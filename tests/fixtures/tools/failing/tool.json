@@ -1,0 +1,12 @@
+{
+  "name": "failing",
+  "description": "Tool that always fails",
+  "category": "testing",
+  "type": "native",
+  "commands": {
+    "crash": {
+      "description": "Exit with error",
+      "args": {}
+    }
+  }
+}

@@ -1,0 +1,17 @@
+#!/bin/bash
+case "$1" in
+  say)
+    echo "$2"
+    ;;
+  greet)
+    if [ "$3" = "--loud" ]; then
+      echo "HELLO $2!"
+    else
+      echo "Hello $2"
+    fi
+    ;;
+  *)
+    echo "unknown command: $1" >&2
+    exit 1
+    ;;
+esac
