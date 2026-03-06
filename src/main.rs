@@ -12,6 +12,7 @@ mod output;
 mod registry;
 mod rule;
 mod runner;
+mod serve;
 mod skill;
 mod workflow;
 
@@ -59,6 +60,7 @@ async fn run(cli: Cli) -> Result<(), ToolshedError> {
         Command::Agent { action } => cmd_agent(action).await,
         Command::Rule { action } => cmd_rule(action).await,
         Command::Workflow { action } => cmd_workflow(action).await,
+        Command::Serve { port, category } => serve::serve(port, category).await,
         Command::Audit { action } => cmd_audit(action, cli.own_audit_trail).await,
     }
 }

@@ -108,6 +108,15 @@ fn convert_tool_def(def: &McpToolDef) -> McpToolInfo {
     }
 }
 
+/// Get raw MCP tool definitions with input_schema intact (no lossy conversion).
+pub async fn get_raw_mcp_tool_defs(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
+    let mcp_cfg = tool.manifest.mcp.as_ref().unwrap();
+    match mcp_cfg.transport {
+        McpTransport::Stdio => mcp::stdio::list_tools(tool).await,
+        McpTransport::Http => mcp::http::list_tools(tool).await,
+    }
+}
+
 fn cache_path_for(tool: &Tool) -> PathBuf {
     config::cache_dir().join(format!("{}.tools.json", tool.manifest.name))
 }

@@ -86,6 +86,15 @@ pub enum Command {
         #[command(subcommand)]
         action: WorkflowAction,
     },
+    /// Start MCP HTTP server exposing all tools
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "8888")]
+        port: u16,
+        /// Only expose tools matching this category
+        #[arg(long)]
+        category: Option<String>,
+    },
     /// Audit trail management
     Audit {
         #[command(subcommand)]
