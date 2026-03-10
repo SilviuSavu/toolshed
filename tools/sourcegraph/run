@@ -83,35 +83,38 @@ cmd_keyword_search() {
     local result
     result=$(sg_search "$query" "$count")
 
-    if [[ "$format" == "json" ]]; then
-        echo "$result" | jq '.data.search.results'
-    else
-        local result_count
-        result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
-        echo "Found $result_count result(s) for: $query"
-        echo "---"
-        echo "$result" | jq -r '
-            .data.search.results.results[] |
-            if .file then
-                "\(.repository.name) \(.file.path)",
-                (.lineMatches[]? | "  L\(.lineNumber): \(.preview)")
-            else empty end
-        ' 2>/dev/null || true
-    fi
+    case "$format" in
+        raw)  echo "$result" ;;
+        json) echo "$result" | jq '.data.search.results' ;;
+        *)
+            local result_count
+            result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
+            echo "Found $result_count result(s) for: $query"
+            echo "---"
+            echo "$result" | jq -r '
+                .data.search.results.results[] |
+                if .file then
+                    "\(.repository.name) \(.file.path)",
+                    (.lineMatches[]? | "  L\(.lineNumber): \(.preview)")
+                else empty end
+            ' 2>/dev/null || true
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
 # read_file
 # ---------------------------------------------------------------------------
 cmd_read_file() {
-    local repo="" path="" rev="HEAD"
+    local repo="" path="" rev="HEAD" format="text"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --path) path="$2"; shift 2 ;;
-            --rev)  rev="$2";  shift 2 ;;
-            -*)     die "unknown flag: $1" ;;
-            *)      repo="$1"; shift ;;
+            --path)   path="$2";   shift 2 ;;
+            --rev)    rev="$2";    shift 2 ;;
+            --format) format="$2"; shift 2 ;;
+            -*)       die "unknown flag: $1" ;;
+            *)        repo="$1";   shift ;;
         esac
     done
 
@@ -130,6 +133,11 @@ cmd_read_file() {
 
     local result
     result=$(graphql "$gql_payload")
+
+    if [[ "$format" == "raw" ]]; then
+        echo "$result"
+        return
+    fi
 
     local content
     content=$(echo "$result" | jq -r '.data.repository.commit.file.content // empty')
@@ -150,14 +158,15 @@ cmd_read_file() {
 # list_repos
 # ---------------------------------------------------------------------------
 cmd_list_repos() {
-    local query="" count="25"
+    local query="" count="25" format="text"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --query) query="$2"; shift 2 ;;
-            --count) count="$2"; shift 2 ;;
-            -*)      die "unknown flag: $1" ;;
-            *)       die "unexpected argument: $1" ;;
+            --query)  query="$2";  shift 2 ;;
+            --count)  count="$2";  shift 2 ;;
+            --format) format="$2"; shift 2 ;;
+            -*)       die "unknown flag: $1" ;;
+            *)        die "unexpected argument: $1" ;;
         esac
     done
 
@@ -166,12 +175,17 @@ cmd_list_repos() {
         --arg query "$query" \
         --argjson count "$count" \
         '{
-            query: "query ListRepos($query: String, $count: Int!) { repositories(query: $query, first: $count) { nodes { name description url } totalCount } }",
+            query: "query ListRepos($query: String, $count: Int!) { repositories(query: $query, first: $count) { nodes { name description url } totalCount pageInfo { hasNextPage endCursor } } }",
             variables: { query: $query, count: $count }
         }')
 
     local result
     result=$(graphql "$gql_payload")
+
+    if [[ "$format" == "raw" ]]; then
+        echo "$result"
+        return
+    fi
 
     local total
     total=$(echo "$result" | jq -r '.data.repositories.totalCount // 0')
@@ -184,14 +198,15 @@ cmd_list_repos() {
 # list_files
 # ---------------------------------------------------------------------------
 cmd_list_files() {
-    local repo="" path="." rev="HEAD"
+    local repo="" path="." rev="HEAD" format="text"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --path) path="$2"; shift 2 ;;
-            --rev)  rev="$2";  shift 2 ;;
-            -*)     die "unknown flag: $1" ;;
-            *)      repo="$1"; shift ;;
+            --path)   path="$2";   shift 2 ;;
+            --rev)    rev="$2";    shift 2 ;;
+            --format) format="$2"; shift 2 ;;
+            -*)       die "unknown flag: $1" ;;
+            *)        repo="$1";   shift ;;
         esac
     done
 
@@ -203,12 +218,17 @@ cmd_list_files() {
         --arg rev "$rev" \
         --arg path "$path" \
         '{
-            query: "query ListFiles($repo: String!, $path: String!, $rev: String!) { repository(name: $repo) { commit(rev: $rev) { tree(path: $path) { entries { name path isDirectory } } } } }",
+            query: "query ListFiles($repo: String!, $path: String!, $rev: String!) { repository(name: $repo) { commit(rev: $rev) { tree(path: $path, recursive: false) { entries { name path isDirectory } } } } }",
             variables: { repo: $repo, path: $path, rev: $rev }
         }')
 
     local result
     result=$(graphql "$gql_payload")
+
+    if [[ "$format" == "raw" ]]; then
+        echo "$result"
+        return
+    fi
 
     local entries
     entries=$(echo "$result" | jq -r '.data.repository.commit.tree.entries // empty')
@@ -301,23 +321,25 @@ cmd_commit_search() {
     local result
     result=$(sg_search "$search_q" "$count")
 
-    if [[ "$format" == "json" ]]; then
-        echo "$result" | jq '.data.search.results'
-    else
-        local result_count
-        result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
-        echo "Found $result_count commit(s):"
-        echo "---"
-        echo "$result" | jq -r '
-            .data.search.results.results[]? |
-            select(.commit) |
-            "\(.commit.abbreviatedOID) \(.commit.repository.name)",
-            "  Author: \(.commit.author.person.displayName) <\(.commit.author.person.email)>",
-            "  Date:   \(.commit.author.date)",
-            "  \(.commit.message.subject)",
-            ""
-        '
-    fi
+    case "$format" in
+        raw)  echo "$result" ;;
+        json) echo "$result" | jq '.data.search.results' ;;
+        *)
+            local result_count
+            result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
+            echo "Found $result_count commit(s):"
+            echo "---"
+            echo "$result" | jq -r '
+                .data.search.results.results[]? |
+                select(.commit) |
+                "\(.commit.abbreviatedOID) \(.commit.repository.name)",
+                "  Author: \(.commit.author.person.displayName) <\(.commit.author.person.email)>",
+                "  Date:   \(.commit.author.date)",
+                "  \(.commit.message.subject)",
+                ""
+            '
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -348,21 +370,23 @@ cmd_diff_search() {
     local result
     result=$(sg_search "$search_q" "$count")
 
-    if [[ "$format" == "json" ]]; then
-        echo "$result" | jq '.data.search.results'
-    else
-        local result_count
-        result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
-        echo "Found $result_count diff result(s):"
-        echo "---"
-        echo "$result" | jq -r '
-            .data.search.results.results[]? |
-            select(.commit) |
-            "\(.commit.abbreviatedOID) \(.commit.repository.name) — \(.commit.message.subject)",
-            (if .diffPreview.value then "  \(.diffPreview.value | split("\n") | map(select(length > 0)) | first)" else "" end),
-            ""
-        '
-    fi
+    case "$format" in
+        raw)  echo "$result" ;;
+        json) echo "$result" | jq '.data.search.results' ;;
+        *)
+            local result_count
+            result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
+            echo "Found $result_count diff result(s):"
+            echo "---"
+            echo "$result" | jq -r '
+                .data.search.results.results[]? |
+                select(.commit) |
+                "\(.commit.abbreviatedOID) \(.commit.repository.name) — \(.commit.message.subject)",
+                (if .diffPreview.value then "  \(.diffPreview.value | split("\n") | map(select(length > 0)) | first)" else "" end),
+                ""
+            '
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------

@@ -9,10 +9,26 @@ set -euo pipefail
 DB_DIR="$HOME/.toolshed/data"
 DB_PATH="$DB_DIR/code-monitor.db"
 
-VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
-VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+TOOLSHED_URL="${TOOLSHED_URL:-http://localhost:8081}"
 
 # ---- helpers --------------------------------------------------------------
+
+ts_call() {
+  local tool="$1"
+  shift
+  local args_json="$@"
+  local response
+  response=$(curl -sf --max-time 30 -X POST "$TOOLSHED_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args_json}}")
+  local is_err
+  is_err=$(echo "$response" | jq -r '.result.isError // false')
+  if [[ "$is_err" == "true" ]]; then
+    echo "ERROR: $(echo "$response" | jq -r '.result.content[0].text')" >&2
+    return 1
+  fi
+  echo "$response" | jq -r '.result.content[0].text'
+}
 
 ensure_db() {
   mkdir -p "$DB_DIR"
@@ -42,41 +58,6 @@ SQL
   if [[ "$has_enabled" -eq 0 ]]; then
     sqlite3 "$DB_PATH" "ALTER TABLE monitors ADD COLUMN enabled INTEGER DEFAULT 1;"
   fi
-}
-
-load_credentials() {
-  local vault_resp
-  vault_resp=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" \
-    "$VAULT_ADDR/v1/secret/data/sourcegraph") || {
-    echo "ERROR: failed to fetch Sourcegraph credentials from Vault" >&2
-    exit 1
-  }
-  SRC_URL=$(echo "$vault_resp" | jq -r '.data.data.url')
-  SRC_TOKEN=$(echo "$vault_resp" | jq -r '.data.data.token')
-
-  if [[ -z "$SRC_URL" || "$SRC_URL" == "null" ]]; then
-    echo "ERROR: Sourcegraph URL not found in Vault response" >&2
-    exit 1
-  fi
-  if [[ -z "$SRC_TOKEN" || "$SRC_TOKEN" == "null" ]]; then
-    echo "ERROR: Sourcegraph token not found in Vault response" >&2
-    exit 1
-  fi
-}
-
-sourcegraph_search() {
-  local query="$1"
-  local gql_query
-  gql_query=$(jq -n --arg q "$query" '{
-    query: "query Search($query: String!) { search(query: $query) { results { results { ... on CommitSearchResult { commit { repository { name } oid abbreviatedOID message { subject } author { person { displayName } date } } diffPreview { value } } ... on FileMatch { repository { name } file { path } lineMatches { preview lineNumber } } } matchCount } } }",
-    variables: { query: $q }
-  }')
-
-  curl -sf \
-    -H "Authorization: token $SRC_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$gql_query" \
-    "$SRC_URL/.api/graphql"
 }
 
 parse_matches() {
@@ -265,7 +246,6 @@ cmd_trigger_check() {
   done
 
   ensure_db
-  load_credentials
 
   if [[ -n "$name" ]]; then
     trigger_check_single "$name" "$since"
@@ -315,7 +295,9 @@ trigger_check_single() {
   echo "Checking monitor '$name' (since $since)..."
 
   local raw_response
-  raw_response=$(sourcegraph_search "$full_query") || {
+  local ts_args
+  ts_args=$(jq -n --arg q "$full_query" '{query: $q, format: "raw", count: "50"}')
+  raw_response=$(ts_call "sourcegraph__keyword_search" "$ts_args") || {
     echo "ERROR: Sourcegraph search failed for monitor '$name'" >&2
     return 1
   }
@@ -366,7 +348,6 @@ trigger_check_single() {
 
 cmd_trigger_check_all() {
   ensure_db
-  load_credentials
 
   local monitors
   monitors=$(sqlite3 "$DB_PATH" "SELECT name FROM monitors WHERE enabled = 1;")
@@ -546,33 +527,17 @@ cmd_reset() {
 cmd_health() {
   local errors=0
 
-  # Check Vault / credentials
-  echo "Checking Vault credentials..."
-  if load_credentials 2>/dev/null; then
-    echo "  Vault: OK (Sourcegraph URL: $SRC_URL)"
-  else
-    echo "  Vault: FAIL — cannot fetch Sourcegraph credentials"
-    errors=$((errors + 1))
-  fi
-
-  # Check Sourcegraph connectivity
+  # Check Sourcegraph via toolshed
   echo "Checking Sourcegraph connectivity..."
-  if [[ -n "${SRC_URL:-}" && -n "${SRC_TOKEN:-}" ]]; then
-    local resp
-    resp=$(curl -sf -o /dev/null -w "%{http_code}" \
-      -H "Authorization: token $SRC_TOKEN" \
-      "$SRC_URL/.api/graphql" \
-      -d '{"query":"{ currentUser { username } }"}' 2>/dev/null) || resp="000"
-    if [[ "$resp" == "200" ]]; then
-      echo "  Sourcegraph API: OK (HTTP $resp)"
-    else
-      echo "  Sourcegraph API: FAIL (HTTP $resp)"
-      errors=$((errors + 1))
-    fi
-  else
-    echo "  Sourcegraph API: SKIPPED (no credentials)"
+  local sg_health
+  sg_health=$(ts_call "sourcegraph__health" "{}" 2>&1) && {
+    echo "  Sourcegraph: OK"
+    echo "$sg_health" | head -3 | sed 's/^/    /'
+  } || {
+    echo "  Sourcegraph: FAIL"
+    echo "$sg_health" | head -3 | sed 's/^/    /'
     errors=$((errors + 1))
-  fi
+  }
 
   # Check DB
   echo "Checking database..."

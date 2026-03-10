@@ -25,7 +25,7 @@
           "type": "string",
           "required": false,
           "positional": false,
-          "description": "Output format: text or json (default: text)"
+          "description": "Output format: text, json, or raw (default: text). raw returns full GraphQL response."
         }
       }
     },
@@ -49,6 +49,12 @@
           "required": false,
           "positional": false,
           "description": "Revision to read from (default: HEAD)"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format: text or raw (default: text). raw returns full GraphQL response."
         }
       }
     },
@@ -66,6 +72,12 @@
           "required": false,
           "positional": false,
           "description": "Maximum number of repositories to return (default: 25)"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format: text or raw (default: text). raw returns full GraphQL response."
         }
       }
     },
@@ -89,6 +101,12 @@
           "required": false,
           "positional": false,
           "description": "Revision to browse (default: HEAD)"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format: text or raw (default: text). raw returns full GraphQL response."
         }
       }
     },
@@ -164,7 +182,7 @@
           "type": "string",
           "required": false,
           "positional": false,
-          "description": "Output format: text or json (default: text)"
+          "description": "Output format: text, json, or raw (default: text). raw returns full GraphQL response."
         }
       }
     },
@@ -205,7 +223,7 @@
           "type": "string",
           "required": false,
           "positional": false,
-          "description": "Output format: text or json (default: text)"
+          "description": "Output format: text, json, or raw (default: text). raw returns full GraphQL response."
         }
       }
     },
@@ -234,7 +252,7 @@
           "type": "string",
           "required": false,
           "positional": false,
-          "description": "Output format: text or json (default: text)"
+          "description": "Output format: text, json, or raw (default: text). raw returns full GraphQL response."
         }
       }
     },

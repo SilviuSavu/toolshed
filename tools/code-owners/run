@@ -5,8 +5,7 @@ set -euo pipefail
 # code-owners — Parse CODEOWNERS files and resolve ownership
 # ---------------------------------------------------------------------------
 
-VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
-VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+TOOLSHED_URL="${TOOLSHED_URL:-http://localhost:8081}"
 
 DB_DIR="$HOME/.toolshed/data"
 DB="$DB_DIR/code-owners.db"
@@ -19,17 +18,21 @@ CODEOWNERS_PATHS=("CODEOWNERS" ".github/CODEOWNERS" ".gitlab/CODEOWNERS" "docs/C
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-load_credentials() {
-  local secret
-  secret=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" \
-    "$VAULT_ADDR/v1/secret/data/sourcegraph") \
-    || die "Failed to fetch Sourcegraph credentials from Vault"
-  SG_URL=$(echo "$secret" | jq -r '.data.data.url')
-  SG_TOKEN=$(echo "$secret" | jq -r '.data.data.token')
-  [[ -n "$SG_URL" && "$SG_URL" != "null" ]] || die "Sourcegraph URL not found in Vault"
-  [[ -n "$SG_TOKEN" && "$SG_TOKEN" != "null" ]] || die "Sourcegraph token not found in Vault"
-  # Strip trailing slash
-  SG_URL="${SG_URL%/}"
+# Call a tool via the toolshed JSON-RPC endpoint.
+ts_call() {
+  local tool="$1"
+  local args_json="$2"
+  local response
+  response=$(curl -sf --max-time 30 -X POST "$TOOLSHED_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args_json}}")
+  local is_err
+  is_err=$(echo "$response" | jq -r '.result.isError // false')
+  if [[ "$is_err" == "true" ]]; then
+    echo "ERROR: $(echo "$response" | jq -r '.result.content[0].text')" >&2
+    return 1
+  fi
+  echo "$response" | jq -r '.result.content[0].text'
 }
 
 init_db() {
@@ -51,73 +54,33 @@ CREATE TABLE IF NOT EXISTS rules (
 SQL
 }
 
-# Execute a Sourcegraph GraphQL query. $1 = query, $2 = variables JSON.
-sg_graphql() {
-  local query="$1"
-  local variables="${2-"{}"}"
-  local payload
-  payload=$(printf '{"query":%s,"variables":%s}' "$(jq -n --arg q "$query" '$q')" "$variables")
-  curl -sf --max-time 15 -X POST "$SG_URL/.api/graphql" \
-    -H "Authorization: token $SG_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$payload"
-}
-
-# Read a file from a repo via Sourcegraph.
+# Read a file from a repo via toolshed -> sourcegraph
 sg_read_file() {
   local repo="$1" path="$2"
-  local query='query ReadFile($repo: String!, $path: String!) {
-    repository(name: $repo) {
-      commit(rev: "HEAD") {
-        file(path: $path) { content }
-      }
-    }
-  }'
-  local vars
-  vars=$(jq -n --arg r "$repo" --arg p "$path" '{repo: $r, path: $p}')
-  local result
-  result=$(sg_graphql "$query" "$vars")
-  echo "$result" | jq -r '.data.repository.commit.file.content // empty'
+  local args_json
+  args_json=$(jq -n --arg r "$repo" --arg p "$path" '{"repo": $r, "path": $p}')
+  ts_call "sourcegraph__read_file" "$args_json"
 }
 
-# List files in a repo via Sourcegraph.
+# List files in a repo via toolshed -> sourcegraph
+# Note: sourcegraph__list_files returns formatted text, need to parse it
 sg_list_files() {
   local repo="$1"
-  local query='query ListFiles($repo: String!) {
-    repository(name: $repo) {
-      commit(rev: "HEAD") {
-        tree(path: "", recursive: true) {
-          entries { path isDirectory }
-        }
-      }
-    }
-  }'
-  local vars
-  vars=$(jq -n --arg r "$repo" '{repo: $r}')
+  local args_json
+  args_json=$(jq -n --arg r "$repo" --arg fmt "raw" '{"repo": $r, "format": $fmt}')
   local result
-  result=$(sg_graphql "$query" "$vars")
+  result=$(ts_call "sourcegraph__list_files" "$args_json")
+  # raw format returns GraphQL JSON; extract file paths
   echo "$result" | jq -r '.data.repository.commit.tree.entries[] | select(.isDirectory == false) | .path'
 }
 
-# List all indexed repos from Sourcegraph.
+# List all indexed repos via toolshed -> sourcegraph
 sg_list_repos() {
-  local after="null"
-  local has_next="true"
-  while [[ "$has_next" == "true" ]]; do
-    local query='query ListRepos($after: String) {
-      repositories(first: 100, after: $after) {
-        nodes { name }
-        pageInfo { hasNextPage endCursor }
-      }
-    }'
-    local vars
-    vars=$(jq -n --arg a "$after" 'if $a == "null" then {after: null} else {after: $a} end')
-    local result
-    result=$(sg_graphql "$query" "$vars")
-    echo "$result" | jq -r '.data.repositories.nodes[].name'
-    has_next=$(echo "$result" | jq -r '.data.repositories.pageInfo.hasNextPage')
-    after=$(echo "$result" | jq -r '.data.repositories.pageInfo.endCursor')
-  done
+  local args_json
+  args_json=$(jq -n --arg c "500" --arg fmt "raw" '{"count": $c, "format": $fmt}')
+  local result
+  result=$(ts_call "sourcegraph__list_repos" "$args_json")
+  echo "$result" | jq -r '.data.repositories.nodes[].name'
 }
 
 # ---------------------------------------------------------------------------
@@ -274,7 +237,6 @@ cmd_sync() {
     esac
   done
 
-  load_credentials
   init_db
 
   local repos
@@ -611,7 +573,6 @@ cmd_unowned() {
   local repo="${1:-}"
   [[ -n "$repo" ]] || die "Usage: code-owners unowned <repo>"
 
-  load_credentials
   init_db
 
   # Check repo exists in DB
@@ -658,31 +619,13 @@ cmd_unowned() {
 cmd_health() {
   local ok=true
 
-  # Check Vault connectivity
-  echo "=== Vault ==="
-  if curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph" >/dev/null 2>&1; then
-    echo "  Vault: OK"
-  else
-    echo "  Vault: UNREACHABLE"
-    ok=false
-  fi
-
-  # Check Sourcegraph connectivity
-  echo ""
+  # Check Sourcegraph connectivity via toolshed
   echo "=== Sourcegraph ==="
-  if load_credentials 2>/dev/null; then
-    local result
-    result=$(sg_graphql '{ currentUser { username } }' '{}' 2>/dev/null) || true
-    local user
-    user=$(echo "$result" | jq -r '.data.currentUser.username // empty' 2>/dev/null)
-    if [[ -n "$user" ]]; then
-      echo "  Sourcegraph: OK (authenticated as $user)"
-    else
-      echo "  Sourcegraph: AUTHENTICATION FAILED"
-      ok=false
-    fi
+  local sg_health
+  if sg_health=$(ts_call "sourcegraph__health" "{}" 2>/dev/null); then
+    echo "  Sourcegraph: OK"
   else
-    echo "  Sourcegraph: CREDENTIALS UNAVAILABLE"
+    echo "  Sourcegraph: UNREACHABLE"
     ok=false
   fi
 

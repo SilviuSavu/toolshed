@@ -3,14 +3,14 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # code-insights: Track Sourcegraph search result counts over time
+# Aligned with Sourcegraph Enterprise Code Insights GraphQL API naming
 # ---------------------------------------------------------------------------
 
-VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
-VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+TOOLSHED_URL="${TOOLSHED_URL:-http://localhost:8081}"
 DB_DIR="$HOME/.toolshed/data"
 DB_PATH="$DB_DIR/code-insights.db"
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# -- Helpers -----------------------------------------------------------------
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo ":: $*"; }
@@ -48,47 +48,21 @@ CREATE TABLE IF NOT EXISTS dashboard_insights (
 SQL
 }
 
-load_credentials() {
-  local secret
-  secret=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" \
-    "$VAULT_ADDR/v1/secret/data/sourcegraph") \
-    || die "Failed to fetch Sourcegraph credentials from Vault"
-
-  SG_URL=$(echo "$secret" | jq -r '.data.data.url')
-  SG_TOKEN=$(echo "$secret" | jq -r '.data.data.token')
-
-  [[ -n "$SG_URL" && "$SG_URL" != "null" ]]     || die "Sourcegraph URL not found in Vault"
-  [[ -n "$SG_TOKEN" && "$SG_TOKEN" != "null" ]]  || die "Sourcegraph token not found in Vault"
-}
-
-# Run a Sourcegraph GraphQL search and return the raw JSON response.
-sg_search() {
-  local query="$1"
-  local gql_query='query Search($q: String!) {
-    search(query: $q) {
-      results {
-        matchCount
-        results {
-          ... on FileMatch {
-            repository { name }
-            file { path }
-            lineMatches { lineNumber preview }
-          }
-        }
-      }
-    }
-  }'
-
-  local payload
-  payload=$(jq -n --arg q "$query" --arg gql "$gql_query" \
-    '{ query: $gql, variables: { q: $q } }')
-
-  curl -sf -X POST \
-    -H "Authorization: token $SG_TOKEN" \
+# Call a tool through the toolshed JSON-RPC endpoint.
+ts_call() {
+  local tool="$1"
+  local args_json="$2"
+  local response
+  response=$(curl -sf --max-time 30 -X POST "$TOOLSHED_URL" \
     -H "Content-Type: application/json" \
-    -d "$payload" \
-    "${SG_URL}/.api/graphql" \
-    || die "Sourcegraph GraphQL request failed"
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args_json}}")
+  local is_err
+  is_err=$(echo "$response" | jq -r '.result.isError // false')
+  if [[ "$is_err" == "true" ]]; then
+    echo "ERROR: $(echo "$response" | jq -r '.result.content[0].text')" >&2
+    return 1
+  fi
+  echo "$response" | jq -r '.result.content[0].text'
 }
 
 # Extract match count from a search response.
@@ -119,21 +93,23 @@ collect_one() {
 
   info "Collecting: $name  (query: $query)"
 
-  local response
-  response=$(sg_search "$query")
+  local args_json
+  args_json=$(jq -n --arg q "$query" '{"query": $q, "format": "raw", "count": "100"}')
+  local raw_response
+  raw_response=$(ts_call "sourcegraph__keyword_search" "$args_json")
 
   local count
-  count=$(extract_match_count "$response")
+  count=$(extract_match_count "$raw_response")
 
   local by_repo
-  by_repo=$(extract_by_repo "$response")
+  by_repo=$(extract_by_repo "$raw_response")
 
   sqlite3 "$DB_PATH" "INSERT INTO data_points (insight_name, match_count, by_repo) VALUES ('$name', $count, '$(echo "$by_repo" | sed "s/'/''/g")');"
 
   info "  Recorded: count=$count  repos=$(echo "$by_repo" | jq 'length')"
 }
 
-# ── Bar rendering ──────────────────────────────────────────────────────────
+# -- Bar rendering -----------------------------------------------------------
 
 render_bar() {
   local value="$1" max_value="$2" max_width="${3:-40}"
@@ -154,11 +130,9 @@ render_bar() {
     bar+="█"
   done
   if [[ "$remainder" -gt 0 ]]; then
-    # Extract the fractional block character (UTF-8 aware)
     local idx=$(( remainder - 1 ))
     local frac
     frac=$(echo "$blocks" | grep -oP '.'{1} | sed -n "$(( idx + 1 ))p" 2>/dev/null || true)
-    # Fallback: use bash substring on the known characters
     if [[ -z "$frac" ]]; then
       local block_chars=(▏ ▎ ▍ ▌ ▋ ▊ ▉ █)
       frac="${block_chars[$idx]}"
@@ -169,9 +143,10 @@ render_bar() {
   echo "$bar"
 }
 
-# ── Commands ───────────────────────────────────────────────────────────────
+# -- Commands ----------------------------------------------------------------
 
-cmd_create() {
+# create_insight -- matches createLineChartSearchInsight concept
+cmd_create_insight() {
   local name="" query="" description="" interval=24
 
   while [[ $# -gt 0 ]]; do
@@ -201,6 +176,49 @@ cmd_create() {
   [[ -z "$description" ]] || info "  Desc:     $description"
 }
 
+# update_insight -- matches updateLineChartSearchInsight concept
+cmd_update_insight() {
+  local name="" query="" description="" interval=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --query)       query="$2"; shift 2 ;;
+      --description) description="$2"; shift 2 ;;
+      --interval)    interval="$2"; shift 2 ;;
+      -*)            die "Unknown flag: $1" ;;
+      *)             [[ -z "$name" ]] && name="$1" || die "Unexpected argument: $1"; shift ;;
+    esac
+  done
+
+  [[ -n "$name" ]] || die "Insight name is required (positional)"
+
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT name FROM insights WHERE name='$name';")
+  [[ -n "$existing" ]] || die "Insight '$name' not found"
+
+  local updates=()
+  [[ -n "$query" ]]       && updates+=("query='$(echo "$query" | sed "s/'/''/g")'")
+  [[ -n "$description" ]] && updates+=("description='$(echo "$description" | sed "s/'/''/g")'")
+  [[ -n "$interval" ]]    && updates+=("interval_hours=$interval")
+
+  if [[ ${#updates[@]} -eq 0 ]]; then
+    die "At least one of --query, --description, or --interval is required"
+  fi
+
+  local set_clause
+  set_clause=$(IFS=','; echo "${updates[*]}")
+
+  sqlite3 "$DB_PATH" "UPDATE insights SET $set_clause WHERE name='$name';"
+
+  info "Updated insight: $name"
+  [[ -z "$query" ]]       || info "  Query:       $query"
+  [[ -z "$description" ]] || info "  Description: $description"
+  [[ -z "$interval" ]]    || info "  Interval:    ${interval}h"
+}
+
+# collect -- no SG equivalent, our data collection
 cmd_collect() {
   local name=""
 
@@ -212,7 +230,6 @@ cmd_collect() {
   done
 
   ensure_db
-  load_credentials
 
   if [[ -n "$name" ]]; then
     collect_one "$name"
@@ -228,9 +245,9 @@ cmd_collect() {
   info "Collection complete."
 }
 
+# collect_all -- collect data for every insight
 cmd_collect_all() {
   ensure_db
-  load_credentials
 
   local names
   names=$(sqlite3 "$DB_PATH" "SELECT name FROM insights ORDER BY name;")
@@ -243,7 +260,8 @@ cmd_collect_all() {
   info "All collections complete."
 }
 
-cmd_trend() {
+# series_points -- matches InsightsSeries.points / InsightDataPoint
+cmd_series_points() {
   local name="" days=30 fmt="text"
 
   while [[ $# -gt 0 ]]; do
@@ -285,7 +303,7 @@ cmd_trend() {
         delta=$(( count - prev_count ))
       fi
       json_arr=$(echo "$json_arr" | jq --arg d "$date" --argjson c "$count" --argjson dl "$delta" \
-        '. + [{ date: $d, count: $c, delta: $dl }]')
+        '. + [{ dateTime: $d, value: $c, delta: $dl }]')
       prev_count="$count"
     done <<< "$rows"
 
@@ -333,6 +351,7 @@ cmd_trend() {
   echo ""
 }
 
+# compare -- keep name, compare two insights side by side
 cmd_compare() {
   local name1="" name2="" days=30
 
@@ -370,7 +389,6 @@ cmd_compare() {
   echo "  $name2 query: $q2"
   echo ""
 
-  # Collect all dates from both insights
   local all_dates
   all_dates=$(sqlite3 "$DB_PATH" \
     "SELECT DISTINCT date(collected_at) as d
@@ -404,9 +422,9 @@ cmd_compare() {
   echo ""
 }
 
-cmd_snapshot() {
+# live_preview -- matches searchInsightLivePreview
+cmd_live_preview() {
   ensure_db
-  load_credentials
 
   local names
   names=$(sqlite3 "$DB_PATH" "SELECT name FROM insights ORDER BY name;")
@@ -420,20 +438,23 @@ cmd_snapshot() {
     local query
     query=$(sqlite3 "$DB_PATH" "SELECT query FROM insights WHERE name='$name';")
 
-    local response
-    response=$(sg_search "$query")
+    local args_json
+    args_json=$(jq -n --arg q "$query" '{"query": $q, "format": "raw", "count": "100"}')
+    local raw_response
+    raw_response=$(ts_call "sourcegraph__keyword_search" "$args_json")
 
     local count
-    count=$(extract_match_count "$response")
+    count=$(extract_match_count "$raw_response")
 
     printf "%-30s %8d  %s\n" "$name" "$count" "$query"
   done <<< "$names"
 
   echo ""
-  info "Snapshot complete (results not stored)."
+  info "Live preview complete (results not stored)."
 }
 
-cmd_list() {
+# list_views -- matches insightViews query
+cmd_list_views() {
   ensure_db
 
   local rows
@@ -447,7 +468,7 @@ cmd_list() {
      ORDER BY i.name;")
 
   if [[ -z "$rows" ]]; then
-    info "No insights defined. Use 'create' to add one."
+    info "No insights defined. Use 'create_insight' to add one."
     return
   fi
 
@@ -467,7 +488,8 @@ cmd_list() {
   echo ""
 }
 
-cmd_delete() {
+# delete_view -- matches deleteInsightView
+cmd_delete_view() {
   local name=""
 
   while [[ $# -gt 0 ]]; do
@@ -488,91 +510,13 @@ cmd_delete() {
   local point_count
   point_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM data_points WHERE insight_name='$name';")
 
-  sqlite3 "$DB_PATH" "DELETE FROM data_points WHERE insight_name='$name'; DELETE FROM insights WHERE name='$name';"
+  # Also remove from any dashboards
+  sqlite3 "$DB_PATH" "DELETE FROM dashboard_insights WHERE insight_name='$name'; DELETE FROM data_points WHERE insight_name='$name'; DELETE FROM insights WHERE name='$name';"
 
   info "Deleted insight '$name' and $point_count data point(s)."
 }
 
-cmd_health() {
-  local ok=true
-
-  # Check database
-  ensure_db
-  if sqlite3 "$DB_PATH" "SELECT 1;" &>/dev/null; then
-    local insight_count
-    insight_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM insights;")
-    local point_count
-    point_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM data_points;")
-    info "Database: OK ($insight_count insights, $point_count data points)"
-  else
-    echo "ERROR: Database not accessible at $DB_PATH"
-    ok=false
-  fi
-
-  # Check Vault + Sourcegraph credentials
-  if load_credentials 2>/dev/null; then
-    info "Vault: OK (credentials loaded)"
-  else
-    echo "ERROR: Cannot load credentials from Vault at $VAULT_ADDR"
-    ok=false
-  fi
-
-  # Check Sourcegraph connectivity
-  if [[ "${SG_URL:-}" != "" ]]; then
-    local status
-    status=$(curl -sf -o /dev/null -w '%{http_code}' \
-      -H "Authorization: token $SG_TOKEN" \
-      "${SG_URL}/.api/graphql" \
-      -X POST -d '{"query":"{ currentUser { username } }"}' 2>/dev/null || echo "000")
-    if [[ "$status" == "200" ]]; then
-      info "Sourcegraph: OK ($SG_URL)"
-    else
-      echo "ERROR: Sourcegraph returned HTTP $status at $SG_URL"
-      ok=false
-    fi
-  fi
-
-  if $ok; then
-    info "All checks passed."
-  else
-    exit 1
-  fi
-}
-
-cmd_update_insight() {
-  local name="" new_query="" new_desc="" new_interval=""
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --query)       new_query="$2"; shift 2 ;;
-      --description) new_desc="$2"; shift 2 ;;
-      --interval)    new_interval="$2"; shift 2 ;;
-      -*)            die "Unknown flag: $1" ;;
-      *)             [[ -z "$name" ]] && name="$1" || die "Unexpected argument: $1"; shift ;;
-    esac
-  done
-
-  [[ -n "$name" ]] || die "Insight name is required (positional)"
-  ensure_db
-
-  local existing
-  existing=$(sqlite3 "$DB_PATH" "SELECT name FROM insights WHERE name='$name';")
-  [[ -n "$existing" ]] || die "Insight '$name' not found"
-
-  local updates=()
-  [[ -n "$new_query" ]]    && updates+=("query='$(echo "$new_query" | sed "s/'/''/g")'")
-  [[ -n "$new_desc" ]]     && updates+=("description='$(echo "$new_desc" | sed "s/'/''/g")'")
-  [[ -n "$new_interval" ]] && updates+=("interval_hours=$new_interval")
-
-  [[ ${#updates[@]} -gt 0 ]] || die "Nothing to update. Use --query, --description, or --interval."
-
-  local set_clause
-  set_clause=$(IFS=','; echo "${updates[*]}")
-  sqlite3 "$DB_PATH" "UPDATE insights SET $set_clause WHERE name='$name';"
-
-  info "Updated insight '$name'."
-}
-
+# validate_query -- validates a query by running a lightweight search through toolshed
 cmd_validate_query() {
   local query=""
 
@@ -585,35 +529,30 @@ cmd_validate_query() {
 
   [[ -n "$query" ]] || die "Query is required (positional)"
 
-  load_credentials
+  local args_json
+  args_json=$(jq -n --arg q "$query" '{"query": $q, "format": "raw", "count": "0"}')
 
-  local response
-  response=$(sg_search "$query" 2>&1) || true
-
-  local errors
-  errors=$(echo "$response" | jq -r '.errors[]?.message // empty' 2>/dev/null)
-
-  if [[ -n "$errors" ]]; then
-    echo "INVALID: $errors"
+  if ts_call "sourcegraph__keyword_search" "$args_json" >/dev/null 2>&1; then
+    info "Query is valid: $query"
+  else
+    echo "ERROR: Query is invalid: $query" >&2
     exit 1
   fi
-
-  local count
-  count=$(echo "$response" | jq -r '.data.search.results.matchCount // 0' 2>/dev/null)
-  info "VALID — query returned $count matches."
 }
 
+# create_dashboard -- matches createInsightsDashboard
 cmd_create_dashboard() {
   local name=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
-      *)      die "Unknown argument: $1" ;;
+      *) die "Unknown argument: $1" ;;
     esac
   done
 
   [[ -n "$name" ]] || die "--name is required"
+
   ensure_db
 
   local existing
@@ -621,32 +560,39 @@ cmd_create_dashboard() {
   [[ -z "$existing" ]] || die "Dashboard '$name' already exists"
 
   sqlite3 "$DB_PATH" "INSERT INTO dashboards (name) VALUES ('$(echo "$name" | sed "s/'/''/g")');"
+
   info "Created dashboard: $name"
 }
 
+# list_dashboards -- matches insightsDashboards query
 cmd_list_dashboards() {
   ensure_db
 
   local rows
   rows=$(sqlite3 -separator '|' "$DB_PATH" \
-    "SELECT d.name, d.created_at, COUNT(di.insight_name) as insights
+    "SELECT d.name, d.created_at, COUNT(di.insight_name) as insight_count
      FROM dashboards d
      LEFT JOIN dashboard_insights di ON di.dashboard_name = d.name
      GROUP BY d.name
      ORDER BY d.name;")
 
   if [[ -z "$rows" ]]; then
-    info "No dashboards. Use 'create_dashboard' to add one."
+    info "No dashboards defined. Use 'create_dashboard' to add one."
     return
   fi
 
-  printf "%-25s %12s %8s\n" "Dashboard" "Created" "Insights"
-  printf "%-25s %12s %8s\n" "---------" "-------" "--------"
+  echo ""
+  printf "%-30s %20s %8s\n" "Dashboard" "Created" "Insights"
+  printf "%-30s %20s %8s\n" "---------" "-------" "--------"
+
   while IFS='|' read -r name created count; do
-    printf "%-25s %12s %8s\n" "$name" "${created:0:10}" "$count"
+    printf "%-30s %20s %8s\n" "$name" "$created" "$count"
   done <<< "$rows"
+
+  echo ""
 }
 
+# add_to_dashboard -- matches addInsightViewToDashboard
 cmd_add_to_dashboard() {
   local insight="" dashboard=""
 
@@ -654,21 +600,33 @@ cmd_add_to_dashboard() {
     case "$1" in
       --insight)   insight="$2"; shift 2 ;;
       --dashboard) dashboard="$2"; shift 2 ;;
-      *)           die "Unknown argument: $1" ;;
+      *) die "Unknown argument: $1" ;;
     esac
   done
 
   [[ -n "$insight" ]]   || die "--insight is required"
   [[ -n "$dashboard" ]] || die "--dashboard is required"
+
   ensure_db
 
-  sqlite3 "$DB_PATH" "SELECT name FROM insights WHERE name='$insight';" | grep -q . || die "Insight '$insight' not found"
-  sqlite3 "$DB_PATH" "SELECT name FROM dashboards WHERE name='$dashboard';" | grep -q . || die "Dashboard '$dashboard' not found"
+  local existing_insight
+  existing_insight=$(sqlite3 "$DB_PATH" "SELECT name FROM insights WHERE name='$insight';")
+  [[ -n "$existing_insight" ]] || die "Insight '$insight' not found"
 
-  sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO dashboard_insights (dashboard_name, insight_name) VALUES ('$dashboard', '$insight');"
-  info "Added '$insight' to dashboard '$dashboard'."
+  local existing_dashboard
+  existing_dashboard=$(sqlite3 "$DB_PATH" "SELECT name FROM dashboards WHERE name='$dashboard';")
+  [[ -n "$existing_dashboard" ]] || die "Dashboard '$dashboard' not found"
+
+  local already
+  already=$(sqlite3 "$DB_PATH" "SELECT insight_name FROM dashboard_insights WHERE dashboard_name='$dashboard' AND insight_name='$insight';")
+  [[ -z "$already" ]] || die "Insight '$insight' is already in dashboard '$dashboard'"
+
+  sqlite3 "$DB_PATH" "INSERT INTO dashboard_insights (dashboard_name, insight_name) VALUES ('$(echo "$dashboard" | sed "s/'/''/g")', '$(echo "$insight" | sed "s/'/''/g")');"
+
+  info "Added insight '$insight' to dashboard '$dashboard'."
 }
 
+# remove_from_dashboard -- matches removeInsightViewFromDashboard
 cmd_remove_from_dashboard() {
   local insight="" dashboard=""
 
@@ -676,38 +634,78 @@ cmd_remove_from_dashboard() {
     case "$1" in
       --insight)   insight="$2"; shift 2 ;;
       --dashboard) dashboard="$2"; shift 2 ;;
-      *)           die "Unknown argument: $1" ;;
+      *) die "Unknown argument: $1" ;;
     esac
   done
 
   [[ -n "$insight" ]]   || die "--insight is required"
   [[ -n "$dashboard" ]] || die "--dashboard is required"
+
   ensure_db
 
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT insight_name FROM dashboard_insights WHERE dashboard_name='$dashboard' AND insight_name='$insight';")
+  [[ -n "$existing" ]] || die "Insight '$insight' is not in dashboard '$dashboard'"
+
   sqlite3 "$DB_PATH" "DELETE FROM dashboard_insights WHERE dashboard_name='$dashboard' AND insight_name='$insight';"
-  info "Removed '$insight' from dashboard '$dashboard'."
+
+  info "Removed insight '$insight' from dashboard '$dashboard'."
 }
 
-# ── Dispatch ───────────────────────────────────────────────────────────────
+# health -- keep name
+cmd_health() {
+  local ok=true
+
+  # Check database
+  ensure_db
+  if sqlite3 "$DB_PATH" "SELECT 1;" &>/dev/null; then
+    local insight_count
+    insight_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM insights;")
+    local point_count
+    point_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM data_points;")
+    local dashboard_count
+    dashboard_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM dashboards;")
+    info "Database: OK ($insight_count insights, $point_count data points, $dashboard_count dashboards)"
+  else
+    echo "ERROR: Database not accessible at $DB_PATH"
+    ok=false
+  fi
+
+  # Check Sourcegraph connectivity through toolshed
+  if ts_call "sourcegraph__health" "{}" >/dev/null 2>&1; then
+    info "Sourcegraph: OK (via toolshed at $TOOLSHED_URL)"
+  else
+    echo "ERROR: Sourcegraph health check failed (via toolshed at $TOOLSHED_URL)"
+    ok=false
+  fi
+
+  if $ok; then
+    info "All checks passed."
+  else
+    exit 1
+  fi
+}
+
+# -- Dispatch ----------------------------------------------------------------
 
 COMMAND="${1:-}"
 shift || true
 
 case "$COMMAND" in
-  create_insight)        cmd_create "$@" ;;
+  create_insight)        cmd_create_insight "$@" ;;
   update_insight)        cmd_update_insight "$@" ;;
-  delete_view)           cmd_delete "$@" ;;
   collect)               cmd_collect "$@" ;;
   collect_all)           cmd_collect_all "$@" ;;
-  series_points)         cmd_trend "$@" ;;
+  series_points)         cmd_series_points "$@" ;;
   compare)               cmd_compare "$@" ;;
-  live_preview)          cmd_snapshot "$@" ;;
-  list_views)            cmd_list "$@" ;;
+  live_preview)          cmd_live_preview "$@" ;;
+  list_views)            cmd_list_views "$@" ;;
+  delete_view)           cmd_delete_view "$@" ;;
   validate_query)        cmd_validate_query "$@" ;;
   create_dashboard)      cmd_create_dashboard "$@" ;;
   list_dashboards)       cmd_list_dashboards "$@" ;;
   add_to_dashboard)      cmd_add_to_dashboard "$@" ;;
   remove_from_dashboard) cmd_remove_from_dashboard "$@" ;;
   health)                cmd_health "$@" ;;
-  *)                     die "Unknown command: $COMMAND" ;;
+  *)                     die "Unknown command: $COMMAND (expected: create_insight|update_insight|collect|collect_all|series_points|compare|live_preview|list_views|delete_view|validate_query|create_dashboard|list_dashboards|add_to_dashboard|remove_from_dashboard|health)" ;;
 esac

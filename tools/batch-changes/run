@@ -25,6 +25,8 @@ SSH_KEY="$HOME/.ssh/id_ed25519"
 VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
 VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
 
+TOOLSHED_URL="${TOOLSHED_URL:-http://localhost:8081}"
+
 mkdir -p "$DATA_DIR"
 
 # ---------------------------------------------------------------------------
@@ -41,17 +43,24 @@ load_gitlab_token() {
   fi
 }
 
-load_sourcegraph_creds() {
-  local payload
-  payload=$(curl -sf \
-    -H "X-Vault-Token: $VAULT_TOKEN" \
-    "$VAULT_ADDR/v1/secret/data/sourcegraph")
-  SRC_URL=$(echo "$payload" | jq -r '.data.data.url')
-  SRC_TOKEN=$(echo "$payload" | jq -r '.data.data.token')
-  if [[ -z "$SRC_URL" || "$SRC_URL" == "null" || -z "$SRC_TOKEN" || "$SRC_TOKEN" == "null" ]]; then
-    echo "ERROR: failed to retrieve Sourcegraph credentials from Vault" >&2
+# ---------------------------------------------------------------------------
+# Toolshed JSON-RPC helper
+# ---------------------------------------------------------------------------
+
+ts_call() {
+  local tool="$1"
+  local args_json="$2"
+  local response
+  response=$(curl -sf --max-time 30 -X POST "$TOOLSHED_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args_json}}")
+  local is_err
+  is_err=$(echo "$response" | jq -r '.result.isError // false')
+  if [[ "$is_err" == "true" ]]; then
+    echo "ERROR: $(echo "$response" | jq -r '.result.content[0].text')" >&2
     return 1
   fi
+  echo "$response" | jq -r '.result.content[0].text'
 }
 
 # ---------------------------------------------------------------------------
@@ -60,22 +69,11 @@ load_sourcegraph_creds() {
 
 sourcegraph_search_repos() {
   local query="$1"
-  local gql_query
-  gql_query=$(jq -n --arg q "$query" '{
-    query: "query($q: String!) { search(query: $q) { results { results { ... on Repository { name } ... on FileMatch { repository { name } } } } } }",
-    variables: { q: $q }
-  }')
-
-  curl -sf \
-    -H "Authorization: token $SRC_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$gql_query" \
-    "$SRC_URL/.api/graphql" \
-  | jq -r '[.data.search.results.results[].repository.name // .data.search.results.results[].name] | unique | .[]' 2>/dev/null \
-  || {
-    echo "ERROR: Sourcegraph search failed" >&2
-    return 1
-  }
+  local args_json
+  args_json=$(jq -n --arg q "$query" '{"query": $q, "format": "raw", "count": "100"}')
+  local result
+  result=$(ts_call "sourcegraph__keyword_search" "$args_json") || return 1
+  echo "$result" | jq -r '[.data.search.results.results[] | (.repository.name // .name)] | unique | .[]' 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -84,24 +82,16 @@ sourcegraph_search_repos() {
 
 sourcegraph_validate_query() {
   local query="$1"
-  local gql_query
-  gql_query=$(jq -n --arg q "$query" '{
-    query: "query($q: String!) { search(query: $q) { results { matchCount } } }",
-    variables: { q: $q }
-  }')
-
-  local response
-  response=$(curl -sf \
-    -H "Authorization: token $SRC_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$gql_query" \
-    "$SRC_URL/.api/graphql" 2>/dev/null) || {
-    echo "ERROR: could not reach Sourcegraph to validate query" >&2
+  local args_json
+  args_json=$(jq -n --arg q "$query" '{"query": $q, "format": "raw", "count": "0"}')
+  local result
+  result=$(ts_call "sourcegraph__keyword_search" "$args_json" 2>&1) || {
+    echo "ERROR: Sourcegraph query is invalid: $result" >&2
     return 1
   }
-
+  # Check for GraphQL errors in the response
   local errors
-  errors=$(echo "$response" | jq -r '.errors // empty | .[].message' 2>/dev/null)
+  errors=$(echo "$result" | jq -r '.errors // empty | .[].message' 2>/dev/null)
   if [[ -n "$errors" ]]; then
     echo "ERROR: Sourcegraph query is invalid:" >&2
     echo "$errors" >&2
@@ -243,7 +233,6 @@ cmd_apply() {
   commit_msg=$(jq -r '.commit_msg' "$spec_file")
   description=$(jq -r '.description' "$spec_file")
 
-  load_sourcegraph_creds
   load_gitlab_token
 
   echo "Searching Sourcegraph for repos matching: $query"
@@ -472,17 +461,13 @@ cmd_validate() {
     echo "  OK: script = $spec_script"
   fi
 
-  # 4. Validate the Sourcegraph query syntax by running the search
+  # 4. Validate the Sourcegraph query syntax via toolshed
   if [[ -n "$spec_query" ]]; then
     echo "Validating Sourcegraph query syntax ..."
-    if load_sourcegraph_creds 2>/dev/null; then
-      if sourcegraph_validate_query "$spec_query"; then
-        echo "  OK: Sourcegraph query is valid"
-      else
-        ok=false
-      fi
+    if sourcegraph_validate_query "$spec_query"; then
+      echo "  OK: Sourcegraph query is valid"
     else
-      echo "  WARN: could not connect to Sourcegraph to validate query (credentials unavailable)"
+      ok=false
     fi
   fi
 
@@ -516,8 +501,6 @@ cmd_repositories() {
 
   local query
   query=$(jq -r '.query' "$spec_file")
-
-  load_sourcegraph_creds
 
   echo "Searching Sourcegraph for repos matching: $query"
   local repos
@@ -616,21 +599,11 @@ cmd_list() {
 cmd_health() {
   local ok=true
 
-  echo "Checking Sourcegraph connectivity ..."
-  if load_sourcegraph_creds 2>/dev/null; then
-    local sg_status
-    sg_status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
-      -H "Authorization: token $SRC_TOKEN" \
-      "$SRC_URL/.api/graphql" \
-      -d '{"query":"{ currentUser { username } }"}' 2>/dev/null || echo "000")
-    if [[ "$sg_status" == "200" ]]; then
-      echo "  Sourcegraph: OK ($SRC_URL)"
-    else
-      echo "  Sourcegraph: FAILED (HTTP $sg_status at $SRC_URL)"
-      ok=false
-    fi
+  echo "Checking Sourcegraph connectivity (via toolshed) ..."
+  if ts_call "sourcegraph__health" "{}" >/dev/null 2>&1; then
+    echo "  Sourcegraph: OK (via $TOOLSHED_URL)"
   else
-    echo "  Sourcegraph: FAILED (could not load credentials from Vault)"
+    echo "  Sourcegraph: FAILED (toolshed call to sourcegraph__health failed)"
     ok=false
   fi
 
