@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Sourcegraph toolshed wrapper — calls Sourcegraph GraphQL API
+# Credentials loaded from Vault at startup
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+# Load credentials from Vault
+_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
+SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
+unset _vault_data
+
+graphql() {
+    curl -sf -H "Authorization: token $SG_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -X POST "$SG_URL/.api/graphql" \
+        -d "$1"
+}
+
+cmd_search() {
+    local query="" count="20" format="text"
+    local positional=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --count) count="$2"; shift 2 ;;
+            --format) format="$2"; shift 2 ;;
+            *) positional+=("$1"); shift ;;
+        esac
+    done
+
+    query="${positional[*]:-}"
+    if [[ -z "$query" ]]; then
+        echo "error: query is required" >&2
+        exit 1
+    fi
+
+    local gql_query
+    gql_query=$(cat <<'GRAPHQL'
+query Search($q: String!) {
+  search(query: $q) {
+    results {
+      matchCount
+      results {
+        ... on FileMatch {
+          repository { name }
+          file { path }
+          lineMatches {
+            lineNumber
+            preview
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+)
+
+    local payload
+    payload=$(jq -n --arg q "$query count:$count" --arg gql "$gql_query" '{query: $gql, variables: {q: $q}}')
+
+    local result
+    result=$(graphql "$payload")
+
+    if [[ "$format" == "json" ]]; then
+        echo "$result" | jq '.data.search.results'
+    else
+        local match_count
+        match_count=$(echo "$result" | jq -r '.data.search.results.matchCount // 0')
+        echo "Found $match_count matches"
+        echo ""
+
+        echo "$result" | jq -r '
+            .data.search.results.results[]? |
+            .repository.name as $repo |
+            .file.path as $file |
+            .lineMatches[]? |
+            "\($repo) \($file):\(.lineNumber) \(.preview)"
+        ' 2>/dev/null | head -200
+    fi
+}
+
+cmd_read() {
+    local repo="${1:-}"
+    local path="${2:-}"
+
+    if [[ -z "$repo" || -z "$path" ]]; then
+        echo "error: repo and path are required" >&2
+        exit 1
+    fi
+
+    local gql_query
+    gql_query=$(cat <<'GRAPHQL'
+query ReadFile($repo: String!, $path: String!) {
+  repository(name: $repo) {
+    commit(rev: "HEAD") {
+      file(path: $path) {
+        content
+      }
+    }
+  }
+}
+GRAPHQL
+)
+
+    local payload
+    payload=$(jq -n --arg r "$repo" --arg p "$path" --arg gql "$gql_query" '{query: $gql, variables: {repo: $r, path: $p}}')
+
+    local result
+    result=$(graphql "$payload")
+
+    local content
+    content=$(echo "$result" | jq -r '.data.repository.commit.file.content // empty')
+
+    if [[ -z "$content" ]]; then
+        echo "error: file not found or repository not indexed" >&2
+        echo "$result" | jq -r '.errors[]?.message // empty' >&2
+        exit 1
+    fi
+
+    echo "$content"
+}
+
+cmd_repos() {
+    local filter=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --filter) filter="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    local gql_query
+    gql_query=$(cat <<'GRAPHQL'
+query ListRepos {
+  repositories(first: 100) {
+    nodes {
+      name
+      mirrorInfo { cloned lastError }
+    }
+  }
+}
+GRAPHQL
+)
+
+    local payload
+    payload=$(jq -n --arg gql "$gql_query" '{query: $gql}')
+
+    local result
+    result=$(graphql "$payload")
+
+    if [[ -n "$filter" ]]; then
+        echo "$result" | jq -r --arg f "$filter" '
+            .data.repositories.nodes[] |
+            select(.name | test($f; "i")) |
+            "\(.name)\t\(.mirrorInfo.cloned)\t\(.mirrorInfo.lastError // "")"
+        '
+    else
+        echo "$result" | jq -r '
+            .data.repositories.nodes[] |
+            "\(.name)\t\(.mirrorInfo.cloned)\t\(.mirrorInfo.lastError // "")"
+        '
+    fi
+}
+
+cmd_symbols() {
+    local query="" repo="" count="20"
+    local positional=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo) repo="$2"; shift 2 ;;
+            --count) count="$2"; shift 2 ;;
+            *) positional+=("$1"); shift ;;
+        esac
+    done
+
+    query="${positional[*]:-}"
+    if [[ -z "$query" ]]; then
+        echo "error: query is required" >&2
+        exit 1
+    fi
+
+    local search_query="type:symbol $query count:$count"
+    if [[ -n "$repo" ]]; then
+        search_query="repo:$repo $search_query"
+    fi
+
+    local gql_query
+    gql_query=$(cat <<'GRAPHQL'
+query SymbolSearch($q: String!) {
+  search(query: $q) {
+    results {
+      matchCount
+      results {
+        ... on FileMatch {
+          repository { name }
+          file { path }
+          symbols {
+            name
+            kind
+            location { range { start { line } } }
+            containerName
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+)
+
+    local payload
+    payload=$(jq -n --arg q "$search_query" --arg gql "$gql_query" '{query: $gql, variables: {q: $q}}')
+
+    local result
+    result=$(graphql "$payload")
+
+    local match_count
+    match_count=$(echo "$result" | jq -r '.data.search.results.matchCount // 0')
+    echo "Found $match_count symbols"
+    echo ""
+
+    echo "$result" | jq -r '
+        .data.search.results.results[]? |
+        .repository.name as $repo |
+        .file.path as $file |
+        .symbols[]? |
+        "\(.kind)\t\(.name)\t\($repo) \($file):\(.location.range.start.line // "?")\t\(.containerName // "")"
+    ' 2>/dev/null | head -100
+}
+
+cmd_health() {
+    local result
+    result=$(graphql '{"query":"{ site { productVersion } repositories(first:0) { totalCount } }"}')
+
+    local version
+    version=$(echo "$result" | jq -r '.data.site.productVersion // "unknown"')
+    local repo_count
+    repo_count=$(echo "$result" | jq -r '.data.repositories.totalCount // 0')
+
+    echo "ok"
+    echo "version: $version"
+    echo "repositories: $repo_count"
+    echo "url: $SG_URL"
+}
+
+# --- dispatch ---
+command="${1:-health}"
+shift || true
+
+case "$command" in
+    search)  cmd_search "$@" ;;
+    read)    cmd_read "$@" ;;
+    repos)   cmd_repos "$@" ;;
+    symbols) cmd_symbols "$@" ;;
+    health)  cmd_health ;;
+    *)
+        echo "unknown command: $command" >&2
+        echo "available: search, read, repos, symbols, health" >&2
+        exit 1
+        ;;
+esac

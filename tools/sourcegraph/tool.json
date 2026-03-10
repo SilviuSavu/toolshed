@@ -1,0 +1,93 @@
+{
+  "name": "sourcegraph",
+  "description": "Code search and navigation across all indexed repositories via Sourcegraph",
+  "category": "code-search",
+  "type": "native",
+  "max_output": 16384,
+  "health": "sourcegraph health",
+  "commands": {
+    "search": {
+      "description": "Search code across all indexed repositories. Supports Sourcegraph query syntax: literal strings, regex (patternType:regexp), structural (patternType:structural). Filter by repo, file, lang.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Sourcegraph search query (e.g. 'repo:myrepo func main', 'lang:rust async fn', 'file:*.go error handling')"
+        },
+        "--count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "default": "20",
+          "description": "Maximum number of results"
+        },
+        "--format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "default": "text",
+          "description": "Output format: text or json"
+        }
+      }
+    },
+    "read": {
+      "description": "Read a file from a repository at a specific path",
+      "args": {
+        "repo": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Repository name (e.g. '100.124.182.121/root/api-router')"
+        },
+        "path": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "File path within the repository"
+        }
+      }
+    },
+    "repos": {
+      "description": "List all indexed repositories",
+      "args": {
+        "--filter": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "default": "",
+          "description": "Filter repos by name substring"
+        }
+      }
+    },
+    "symbols": {
+      "description": "Search for symbol definitions (functions, classes, types) across repositories",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Symbol name or pattern to search for"
+        },
+        "--repo": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "default": "",
+          "description": "Limit search to a specific repository"
+        },
+        "--count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "default": "20",
+          "description": "Maximum number of results"
+        }
+      }
+    },
+    "health": {
+      "description": "Check Sourcegraph connectivity and index status",
+      "args": {}
+    }
+  }
+}
