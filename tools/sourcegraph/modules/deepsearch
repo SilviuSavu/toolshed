@@ -67,7 +67,7 @@ llm_chat() {
     payload=$(jq -n \
         --arg model "$LLM_MODEL" \
         --argjson messages "$messages_json" \
-        '{model: $model, messages: $messages, max_tokens: 131072}')
+        '{model: $model, messages: $messages, max_tokens: 131072, thinking: {type: "enabled", clear_thinking: false}}')
 
     local http_response http_code body
     http_response=$(curl -s --max-time 300 -w '\n%{http_code}' \
