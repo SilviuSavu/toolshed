@@ -4,10 +4,7 @@ set -euo pipefail
 ###############################################################################
 # deepsearch — multi-step LLM-driven code research across Sourcegraph + local
 #
-# Spawns an LLM research loop that combines keyword search, semantic search,
-# symbol navigation, call graphs, and file reads to answer complex questions.
-#
-# Providers: openrouter (default), zai
+# Providers: zai (default, GLM-5), openrouter (Qwen3-coder)
 ###############################################################################
 
 DB_DIR="$HOME/.toolshed/data"
@@ -17,15 +14,10 @@ VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
 VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
 MAX_STEPS=5
 MAX_TOOL_OUTPUT=4000
-
-# Provider defaults
 PROVIDER="${DEEPSEARCH_PROVIDER:-zai}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# ---------------------------------------------------------------------------
-# Vault + LLM provider
-# ---------------------------------------------------------------------------
 LLM_API_KEY=""
 LLM_BASE_URL=""
 LLM_MODEL=""
@@ -62,7 +54,6 @@ load_provider() {
     [[ -n "$LLM_API_KEY" && "$LLM_API_KEY" != "null" ]] \
         || die "API key not found in Vault at secret/data/$vault_path"
 
-    # Z.AI stores base_url in vault too — use it if present
     local vault_url
     vault_url=$(echo "$vault_data" | jq -r '.data.data.base_url // empty')
     if [[ -n "$vault_url" ]]; then
@@ -73,36 +64,29 @@ load_provider() {
 llm_chat() {
     local messages_json="$1"
     local payload
+    payload=$(jq -n \
+        --arg model "$LLM_MODEL" \
+        --argjson messages "$messages_json" \
+        '{model: $model, messages: $messages, max_tokens: 131072}')
 
-    if [[ "$PROVIDER" == "zai" ]]; then
-        # Z.AI GLM-5: enable thinking mode for deeper reasoning
-        payload=$(jq -n \
-            --arg model "$LLM_MODEL" \
-            --argjson messages "$messages_json" \
-            '{model: $model, messages: $messages, max_tokens: 131072, thinking: {type: "enabled", clear_thinking: false}}')
-    else
-        payload=$(jq -n \
-            --arg model "$LLM_MODEL" \
-            --argjson messages "$messages_json" \
-            '{model: $model, messages: $messages, temperature: 0.2, max_tokens: 8192}')
-    fi
-
-    local response
-    response=$(curl -sf --max-time 300 \
+    local http_response http_code body
+    http_response=$(curl -s --max-time 300 -w '\n%{http_code}' \
         -H "Authorization: Bearer $LLM_API_KEY" \
         -H "Content-Type: application/json" \
         -d "$payload" \
-        "$LLM_BASE_URL") \
-        || die "LLM API call failed ($PROVIDER: $LLM_MODEL)"
+        "$LLM_BASE_URL")
+    http_code=$(echo "$http_response" | tail -1)
+    body=$(echo "$http_response" | sed '$d')
 
-    # Extract content — strip thinking traces if present
-    echo "$response" | jq -r '.choices[0].message.content // empty' \
-        | sed '/<think>/,/<\/think>/d'
+    if [[ "$http_code" != "200" ]]; then
+        local err_msg
+        err_msg=$(echo "$body" | jq -r '.error.message // .message // "unknown error"' 2>/dev/null)
+        die "LLM API failed ($PROVIDER: $LLM_MODEL) HTTP $http_code: $err_msg"
+    fi
+
+    echo "$body" | jq -r '.choices[0].message.content // empty'
 }
 
-# ---------------------------------------------------------------------------
-# Toolshed
-# ---------------------------------------------------------------------------
 ts_call() {
     local tool_name="$1"
     local args_json="$2"
@@ -125,7 +109,6 @@ ts_call() {
 
     local text
     text=$(echo "$response" | jq -r '.result.content[0].text // empty')
-    # Truncate to MAX_TOOL_OUTPUT chars
     if [[ ${#text} -gt $MAX_TOOL_OUTPUT ]]; then
         echo "${text:0:$MAX_TOOL_OUTPUT}... [truncated]"
     else
@@ -133,9 +116,6 @@ ts_call() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# SQLite
-# ---------------------------------------------------------------------------
 ensure_db() {
     mkdir -p "$DB_DIR"
     sqlite3 "$DB_PATH" <<'SQL'
@@ -158,9 +138,6 @@ generate_id() {
     printf '%s-%s' "$(date +%s)" "$(head -c4 /dev/urandom | xxd -p)"
 }
 
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
 SYSTEM_PROMPT='You are a code research assistant. You investigate complex questions about codebases by searching, reading files, and tracing code paths.
 
 Available tools (call via tool_calls array):
@@ -190,9 +167,6 @@ Rules:
 - When done, provide a thorough answer with file paths and code references
 - If you cannot find enough information, say so honestly'
 
-# ---------------------------------------------------------------------------
-# Execute tool calls from LLM response
-# ---------------------------------------------------------------------------
 execute_tool_calls() {
     local response_json="$1"
     local results=""
@@ -218,9 +192,6 @@ ${result}
     echo "$results"
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 cmd_deepsearch() {
     local question="" provider="$PROVIDER"
 
@@ -235,19 +206,17 @@ cmd_deepsearch() {
     done
 
     [[ -z "$question" ]] && die "question is required"
-
+    PROVIDER="$provider"
     load_provider "$provider"
     ensure_db
 
     local conv_id
     conv_id=$(generate_id)
 
-    # Insert conversation row
     local q_escaped
     q_escaped=$(echo "$question" | sed "s/'/''/g")
     sqlite3 "$DB_PATH" "INSERT INTO conversations (id, question, provider, model) VALUES ('$conv_id', '$q_escaped', '$provider', '$LLM_MODEL');"
 
-    # Build initial messages
     local messages
     messages=$(jq -n \
         --arg system "$SYSTEM_PROMPT" \
@@ -264,7 +233,6 @@ cmd_deepsearch() {
     while [[ $step -lt $MAX_STEPS ]]; do
         step=$((step + 1))
 
-        # Call LLM
         local llm_response
         llm_response=$(llm_chat "$messages")
 
@@ -274,23 +242,19 @@ cmd_deepsearch() {
             break
         fi
 
-        # Append assistant message
         messages=$(echo "$messages" | jq --arg content "$llm_response" \
             '. + [{"role": "assistant", "content": $content}]')
 
-        # Try to parse as JSON — handle possible markdown fences
         local parsed
         parsed=$(echo "$llm_response" | sed 's/^```json//;s/^```//;s/```$//' \
             | jq -c '.' 2>/dev/null) || true
 
         if [[ -z "$parsed" ]]; then
-            # Try extracting JSON from response
             parsed=$(echo "$llm_response" | grep -o '{.*}' | head -1 \
                 | jq -c '.' 2>/dev/null) || true
         fi
 
         if [[ -z "$parsed" ]]; then
-            # LLM didn't return valid JSON — treat as final answer
             answer="$llm_response"
             break
         fi
@@ -302,11 +266,9 @@ cmd_deepsearch() {
             answer=$(echo "$parsed" | jq -r '.answer // empty')
             break
         elif [[ "$status" == "research" ]]; then
-            # Execute tool calls
             local tool_results
             tool_results=$(execute_tool_calls "$parsed")
 
-            # Append tool results as user message
             messages=$(echo "$messages" | jq --arg content "$tool_results" \
                 '. + [{"role": "user", "content": ("Tool results:\n\n" + $content + "\n\nContinue researching or provide your final answer.")}]')
         else
@@ -315,7 +277,6 @@ cmd_deepsearch() {
         fi
     done
 
-    # If we exhausted steps without an answer, force synthesis
     if [[ -z "$answer" && $step -ge $MAX_STEPS ]]; then
         messages=$(echo "$messages" | jq \
             '. + [{"role": "user", "content": "You have reached the maximum number of research steps. Synthesize a final answer now from all information gathered. Reply with {\"status\":\"done\",\"answer\":\"...\"}"}]')
@@ -332,7 +293,6 @@ cmd_deepsearch() {
         [[ -z "$answer" ]] && answer="$final_response"
     fi
 
-    # Store in SQLite — use temp files to avoid shell quoting with large JSON
     local tmpdir
     tmpdir=$(mktemp -d)
     echo "$answer" > "$tmpdir/answer"
@@ -340,7 +300,6 @@ cmd_deepsearch() {
     sqlite3 "$DB_PATH" "UPDATE conversations SET answer = readfile('$tmpdir/answer'), messages = readfile('$tmpdir/messages'), status = '$final_status', steps = $step, completed_at = datetime('now') WHERE id = '$conv_id';"
     rm -rf "$tmpdir"
 
-    # Output
     echo "# Deep Search Result"
     echo ""
     echo "**ID:** $conv_id"
@@ -353,7 +312,4 @@ cmd_deepsearch() {
     echo "$answer"
 }
 
-###############################################################################
-# Dispatch
-###############################################################################
 cmd_deepsearch "$@"
