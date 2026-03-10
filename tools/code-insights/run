@@ -33,6 +33,18 @@ CREATE TABLE IF NOT EXISTS data_points (
     collected_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (insight_name) REFERENCES insights(name)
 );
+CREATE TABLE IF NOT EXISTS dashboards (
+    name TEXT PRIMARY KEY,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS dashboard_insights (
+    dashboard_name TEXT NOT NULL,
+    insight_name TEXT NOT NULL,
+    added_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (dashboard_name, insight_name),
+    FOREIGN KEY (dashboard_name) REFERENCES dashboards(name),
+    FOREIGN KEY (insight_name) REFERENCES insights(name)
+);
 SQL
 }
 
@@ -508,7 +520,7 @@ cmd_health() {
   # Check Sourcegraph connectivity
   if [[ "${SG_URL:-}" != "" ]]; then
     local status
-    status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
+    status=$(curl -sf -o /dev/null -w '%{http_code}' \
       -H "Authorization: token $SG_TOKEN" \
       "${SG_URL}/.api/graphql" \
       -X POST -d '{"query":"{ currentUser { username } }"}' 2>/dev/null || echo "000")
@@ -527,20 +539,175 @@ cmd_health() {
   fi
 }
 
+cmd_update_insight() {
+  local name="" new_query="" new_desc="" new_interval=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --query)       new_query="$2"; shift 2 ;;
+      --description) new_desc="$2"; shift 2 ;;
+      --interval)    new_interval="$2"; shift 2 ;;
+      -*)            die "Unknown flag: $1" ;;
+      *)             [[ -z "$name" ]] && name="$1" || die "Unexpected argument: $1"; shift ;;
+    esac
+  done
+
+  [[ -n "$name" ]] || die "Insight name is required (positional)"
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT name FROM insights WHERE name='$name';")
+  [[ -n "$existing" ]] || die "Insight '$name' not found"
+
+  local updates=()
+  [[ -n "$new_query" ]]    && updates+=("query='$(echo "$new_query" | sed "s/'/''/g")'")
+  [[ -n "$new_desc" ]]     && updates+=("description='$(echo "$new_desc" | sed "s/'/''/g")'")
+  [[ -n "$new_interval" ]] && updates+=("interval_hours=$new_interval")
+
+  [[ ${#updates[@]} -gt 0 ]] || die "Nothing to update. Use --query, --description, or --interval."
+
+  local set_clause
+  set_clause=$(IFS=','; echo "${updates[*]}")
+  sqlite3 "$DB_PATH" "UPDATE insights SET $set_clause WHERE name='$name';"
+
+  info "Updated insight '$name'."
+}
+
+cmd_validate_query() {
+  local query=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) die "Unknown flag: $1" ;;
+      *)  [[ -z "$query" ]] && query="$1" || die "Unexpected argument: $1"; shift ;;
+    esac
+  done
+
+  [[ -n "$query" ]] || die "Query is required (positional)"
+
+  load_credentials
+
+  local response
+  response=$(sg_search "$query" 2>&1) || true
+
+  local errors
+  errors=$(echo "$response" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+
+  if [[ -n "$errors" ]]; then
+    echo "INVALID: $errors"
+    exit 1
+  fi
+
+  local count
+  count=$(echo "$response" | jq -r '.data.search.results.matchCount // 0' 2>/dev/null)
+  info "VALID — query returned $count matches."
+}
+
+cmd_create_dashboard() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      *)      die "Unknown argument: $1" ;;
+    esac
+  done
+
+  [[ -n "$name" ]] || die "--name is required"
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT name FROM dashboards WHERE name='$name';")
+  [[ -z "$existing" ]] || die "Dashboard '$name' already exists"
+
+  sqlite3 "$DB_PATH" "INSERT INTO dashboards (name) VALUES ('$(echo "$name" | sed "s/'/''/g")');"
+  info "Created dashboard: $name"
+}
+
+cmd_list_dashboards() {
+  ensure_db
+
+  local rows
+  rows=$(sqlite3 -separator '|' "$DB_PATH" \
+    "SELECT d.name, d.created_at, COUNT(di.insight_name) as insights
+     FROM dashboards d
+     LEFT JOIN dashboard_insights di ON di.dashboard_name = d.name
+     GROUP BY d.name
+     ORDER BY d.name;")
+
+  if [[ -z "$rows" ]]; then
+    info "No dashboards. Use 'create_dashboard' to add one."
+    return
+  fi
+
+  printf "%-25s %12s %8s\n" "Dashboard" "Created" "Insights"
+  printf "%-25s %12s %8s\n" "---------" "-------" "--------"
+  while IFS='|' read -r name created count; do
+    printf "%-25s %12s %8s\n" "$name" "${created:0:10}" "$count"
+  done <<< "$rows"
+}
+
+cmd_add_to_dashboard() {
+  local insight="" dashboard=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --insight)   insight="$2"; shift 2 ;;
+      --dashboard) dashboard="$2"; shift 2 ;;
+      *)           die "Unknown argument: $1" ;;
+    esac
+  done
+
+  [[ -n "$insight" ]]   || die "--insight is required"
+  [[ -n "$dashboard" ]] || die "--dashboard is required"
+  ensure_db
+
+  sqlite3 "$DB_PATH" "SELECT name FROM insights WHERE name='$insight';" | grep -q . || die "Insight '$insight' not found"
+  sqlite3 "$DB_PATH" "SELECT name FROM dashboards WHERE name='$dashboard';" | grep -q . || die "Dashboard '$dashboard' not found"
+
+  sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO dashboard_insights (dashboard_name, insight_name) VALUES ('$dashboard', '$insight');"
+  info "Added '$insight' to dashboard '$dashboard'."
+}
+
+cmd_remove_from_dashboard() {
+  local insight="" dashboard=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --insight)   insight="$2"; shift 2 ;;
+      --dashboard) dashboard="$2"; shift 2 ;;
+      *)           die "Unknown argument: $1" ;;
+    esac
+  done
+
+  [[ -n "$insight" ]]   || die "--insight is required"
+  [[ -n "$dashboard" ]] || die "--dashboard is required"
+  ensure_db
+
+  sqlite3 "$DB_PATH" "DELETE FROM dashboard_insights WHERE dashboard_name='$dashboard' AND insight_name='$insight';"
+  info "Removed '$insight' from dashboard '$dashboard'."
+}
+
 # ── Dispatch ───────────────────────────────────────────────────────────────
 
 COMMAND="${1:-}"
 shift || true
 
 case "$COMMAND" in
-  create)      cmd_create "$@" ;;
-  collect)     cmd_collect "$@" ;;
-  collect-all) cmd_collect_all "$@" ;;
-  trend)       cmd_trend "$@" ;;
-  compare)     cmd_compare "$@" ;;
-  snapshot)    cmd_snapshot "$@" ;;
-  list)        cmd_list "$@" ;;
-  delete)      cmd_delete "$@" ;;
-  health)      cmd_health "$@" ;;
-  *)           die "Unknown command: $COMMAND (expected: create|collect|collect-all|trend|compare|snapshot|list|delete|health)" ;;
+  create_insight)        cmd_create "$@" ;;
+  update_insight)        cmd_update_insight "$@" ;;
+  delete_view)           cmd_delete "$@" ;;
+  collect)               cmd_collect "$@" ;;
+  collect_all)           cmd_collect_all "$@" ;;
+  series_points)         cmd_trend "$@" ;;
+  compare)               cmd_compare "$@" ;;
+  live_preview)          cmd_snapshot "$@" ;;
+  list_views)            cmd_list "$@" ;;
+  validate_query)        cmd_validate_query "$@" ;;
+  create_dashboard)      cmd_create_dashboard "$@" ;;
+  list_dashboards)       cmd_list_dashboards "$@" ;;
+  add_to_dashboard)      cmd_add_to_dashboard "$@" ;;
+  remove_from_dashboard) cmd_remove_from_dashboard "$@" ;;
+  health)                cmd_health "$@" ;;
+  *)                     die "Unknown command: $COMMAND" ;;
 esac

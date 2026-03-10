@@ -1,90 +1,158 @@
 {
   "name": "code-monitor",
-  "description": "Watch for new commits matching Sourcegraph search queries and send alerts via webhooks",
+  "description": "Watch for new commits matching Sourcegraph search queries and send alerts via webhooks. Aligned with Sourcegraph Enterprise Code Monitoring GraphQL API.",
   "category": "monitoring",
   "type": "native",
   "max_output": 10000,
   "health": "code-monitor health",
   "commands": {
     "create": {
-      "description": "Create a new code monitor",
+      "description": "Create a new code monitor (maps to createCodeMonitor)",
       "args": {
-        "--name": {
+        "name": {
+          "type": "string",
           "required": true,
-          "description": "Monitor name (unique identifier)",
-          "type": "string",
-          "positional": false
+          "positional": false,
+          "description": "Monitor name (unique identifier)"
         },
-        "--query": {
+        "query": {
+          "type": "string",
           "required": true,
-          "description": "Sourcegraph search query (should include type:diff or type:commit)",
-          "type": "string",
-          "positional": false
+          "positional": false,
+          "description": "Sourcegraph search query (should include type:diff or type:commit)"
         },
-        "--webhook": {
-          "required": false,
-          "description": "Webhook URL to POST alerts to (e.g., Slack incoming webhook)",
+        "webhook": {
           "type": "string",
-          "positional": false
+          "required": false,
+          "positional": false,
+          "description": "Webhook URL to POST alerts to (e.g., Slack incoming webhook)"
         },
-        "--interval": {
-          "required": false,
-          "description": "Check interval in minutes (default: 15, informational — actual scheduling is external)",
+        "interval": {
           "type": "string",
-          "positional": false
+          "required": false,
+          "positional": false,
+          "description": "Check interval in minutes (default: 15, informational only)"
         }
       }
     },
-    "check": {
-      "description": "Run a check for a specific monitor or all monitors",
+    "update": {
+      "description": "Update a monitor's query, webhook, or interval (maps to updateCodeMonitor)",
       "args": {
-        "--name": {
-          "required": false,
-          "description": "Specific monitor to check (if omitted, checks all)",
+        "name": {
           "type": "string",
-          "positional": false
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to update"
         },
-        "--since": {
-          "required": false,
-          "description": "Override 'since' time in ISO8601 format (default: last check time from DB)",
+        "query": {
           "type": "string",
-          "positional": false
+          "required": false,
+          "positional": false,
+          "description": "New Sourcegraph search query"
+        },
+        "webhook": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New webhook URL"
+        },
+        "interval": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New check interval in minutes"
         }
       }
     },
-    "check-all": {
-      "description": "Run checks for all active monitors",
+    "delete": {
+      "description": "Delete a monitor and its event history (maps to deleteCodeMonitor)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to delete"
+        }
+      }
+    },
+    "toggle": {
+      "description": "Enable or disable a monitor (maps to toggleCodeMonitor)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to toggle"
+        },
+        "enabled": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Set to 'true' to enable or 'false' to disable"
+        }
+      }
+    },
+    "trigger_check": {
+      "description": "Evaluate trigger query for a specific monitor (maps to trigger evaluation concept)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Specific monitor to check (if omitted, checks all)"
+        },
+        "since": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Override 'since' time in ISO8601 format (default: last check time from DB)"
+        }
+      }
+    },
+    "trigger_check_all": {
+      "description": "Evaluate trigger queries for all enabled monitors",
       "args": {}
     },
     "list": {
-      "description": "List all monitors with their status",
+      "description": "List all monitors with their status (via currentUser.monitors pattern)",
       "args": {}
     },
-    "delete": {
-      "description": "Delete a monitor",
+    "events": {
+      "description": "Show recent trigger events for a monitor (maps to MonitorTriggerEventConnection)",
       "args": {
         "name": {
+          "type": "string",
           "required": true,
           "positional": true,
-          "description": "Name of the monitor to delete",
-          "type": "string"
+          "description": "Name of the monitor"
+        },
+        "limit": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of events to show (default: 20)"
         }
       }
     },
-    "history": {
-      "description": "Show recent alerts for a monitor",
+    "test_action": {
+      "description": "Send a test webhook for a monitor (maps to triggerTestWebhookAction)",
       "args": {
         "name": {
+          "type": "string",
           "required": true,
           "positional": true,
-          "description": "Name of the monitor",
-          "type": "string"
-        },
-        "--limit": {
-          "required": false,
-          "description": "Maximum number of results to show (default: 20)",
+          "description": "Name of the monitor to test"
+        }
+      }
+    },
+    "reset": {
+      "description": "Reset trigger timestamps to re-evaluate from scratch (maps to resetTriggerQueryTimestamps)",
+      "args": {
+        "name": {
           "type": "string",
-          "positional": false
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to reset"
         }
       }
     },

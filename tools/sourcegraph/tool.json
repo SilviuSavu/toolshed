@@ -1,92 +1,262 @@
 {
   "name": "sourcegraph",
-  "description": "Code search and navigation across all indexed repositories via Sourcegraph",
+  "description": "Search code, browse repositories, read files, and explore commit history on a Sourcegraph instance via its GraphQL and search APIs.",
   "category": "code-search",
   "type": "native",
   "max_output": 16384,
   "health": "sourcegraph health",
   "commands": {
-    "search": {
-      "description": "Search code across all indexed repositories. Supports Sourcegraph query syntax: literal strings, regex (patternType:regexp), structural (patternType:structural). Filter by repo, file, lang.",
+    "keyword_search": {
+      "description": "Search code across all indexed repositories using Sourcegraph's keyword search. Supports standard Sourcegraph query syntax including repo:, file:, lang: filters.",
       "args": {
         "query": {
           "type": "string",
           "required": true,
           "positional": true,
-          "description": "Sourcegraph search query (e.g. 'repo:myrepo func main', 'lang:rust async fn', 'file:*.go error handling')"
+          "description": "Sourcegraph search query (e.g. 'repo:myorg/ lang:go func main')"
         },
-        "--count": {
+        "count": {
           "type": "string",
           "required": false,
           "positional": false,
-          "default": "20",
-          "description": "Maximum number of results"
+          "description": "Maximum number of results to return (default: 30)"
         },
-        "--format": {
+        "format": {
           "type": "string",
           "required": false,
           "positional": false,
-          "default": "text",
-          "description": "Output format: text or json"
+          "description": "Output format: text or json (default: text)"
         }
       }
     },
-    "read": {
-      "description": "Read a file from a repository at a specific path",
+    "read_file": {
+      "description": "Read the contents of a file from a repository at a specific revision.",
       "args": {
         "repo": {
           "type": "string",
           "required": true,
           "positional": true,
-          "description": "Repository name (e.g. '100.124.182.121/root/api-router')"
+          "description": "Repository name (e.g. 'github.com/org/repo')"
         },
         "path": {
           "type": "string",
           "required": true,
-          "positional": true,
-          "description": "File path within the repository"
-        }
-      }
-    },
-    "repos": {
-      "description": "List all indexed repositories",
-      "args": {
-        "--filter": {
+          "positional": false,
+          "description": "Path to the file within the repository"
+        },
+        "rev": {
           "type": "string",
           "required": false,
           "positional": false,
-          "default": "",
-          "description": "Filter repos by name substring"
+          "description": "Revision to read from (default: HEAD)"
+        }
+      }
+    },
+    "list_repos": {
+      "description": "List repositories indexed by the Sourcegraph instance, optionally filtered by a query string.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter repositories by name pattern"
+        },
+        "count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of repositories to return (default: 25)"
+        }
+      }
+    },
+    "list_files": {
+      "description": "List files and directories at a given path within a repository.",
+      "args": {
+        "repo": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Repository name (e.g. 'github.com/org/repo')"
+        },
+        "path": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Path within the repository to list (default: root)"
+        },
+        "rev": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Revision to browse (default: HEAD)"
         }
       }
     },
     "symbols": {
-      "description": "Search for symbol definitions (functions, classes, types) across repositories",
+      "description": "Search for code symbols (functions, classes, variables) across repositories.",
       "args": {
         "query": {
           "type": "string",
           "required": true,
           "positional": true,
-          "description": "Symbol name or pattern to search for"
+          "description": "Symbol search query"
         },
-        "--repo": {
+        "repo": {
           "type": "string",
           "required": false,
           "positional": false,
-          "default": "",
-          "description": "Limit search to a specific repository"
+          "description": "Filter to a specific repository"
         },
-        "--count": {
+        "kind": {
           "type": "string",
           "required": false,
           "positional": false,
-          "default": "20",
-          "description": "Maximum number of results"
+          "description": "Symbol kind filter (e.g. function, class, variable)"
+        },
+        "count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of results (default: 25)"
+        }
+      }
+    },
+    "commit_search": {
+      "description": "Search commits by message, author, content, files, and date ranges using Sourcegraph type:commit search.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Search terms for commit messages or content"
+        },
+        "repo": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter to a specific repository"
+        },
+        "author": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter by commit author name or email"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Only commits after this date (ISO8601, e.g. 2024-01-01)"
+        },
+        "before": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Only commits before this date (ISO8601, e.g. 2024-12-31)"
+        },
+        "count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of results (default: 20)"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format: text or json (default: text)"
+        }
+      }
+    },
+    "diff_search": {
+      "description": "Search actual code changes (diffs) for patterns across repositories using Sourcegraph type:diff search.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Search pattern to find in code diffs"
+        },
+        "repo": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter to a specific repository"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Only diffs after this date (ISO8601)"
+        },
+        "before": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Only diffs before this date (ISO8601)"
+        },
+        "count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of results (default: 20)"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format: text or json (default: text)"
+        }
+      }
+    },
+    "compare_revisions": {
+      "description": "Compare changes between two revisions in a repository, showing file diffs and stats.",
+      "args": {
+        "repo": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Repository name (e.g. 'github.com/org/repo')"
+        },
+        "base": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Base revision (e.g. a commit SHA, branch, or tag)"
+        },
+        "head": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Head revision to compare against base"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format: text or json (default: text)"
+        }
+      }
+    },
+    "get_contributor_repos": {
+      "description": "Find repositories where a specific contributor has made commits.",
+      "args": {
+        "author": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Author name or email to search for"
+        },
+        "count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of commits to search through (default: 50)"
         }
       }
     },
     "health": {
-      "description": "Check Sourcegraph connectivity and index status",
+      "description": "Check connectivity to the Sourcegraph instance and verify authentication.",
       "args": {}
     }
   }

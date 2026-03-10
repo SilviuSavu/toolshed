@@ -1,35 +1,64 @@
 {
   "name": "code-insights",
-  "description": "Track Sourcegraph search result counts over time to visualize code trends and compare metrics",
+  "description": "Track Sourcegraph search result counts over time to visualize code trends, compare metrics, and manage insight dashboards",
   "category": "monitoring",
   "type": "native",
   "max_output": 25000,
   "health": "code-insights health",
   "commands": {
-    "create": {
-      "description": "Create a new insight (tracked metric)",
+    "create_insight": {
+      "description": "Create a new insight (tracked metric) — aligns with createLineChartSearchInsight",
       "args": {
-        "--name": {
+        "name": {
           "required": true,
           "description": "Insight name (e.g. \"deprecated-api-usage\")",
           "type": "string",
           "positional": false
         },
-        "--query": {
+        "query": {
           "required": true,
           "description": "Sourcegraph search query (e.g. \"lang:go fmt.Println\")",
           "type": "string",
           "positional": false
         },
-        "--description": {
+        "description": {
           "required": false,
           "description": "Human-readable description of the insight",
           "type": "string",
           "positional": false
         },
-        "--interval": {
+        "interval": {
           "required": false,
           "description": "Collection interval in hours (default: 24, informational — actual scheduling is external)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "update_insight": {
+      "description": "Update an insight's query, description, or interval — aligns with updateLineChartSearchInsight",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the insight to update",
+          "type": "string"
+        },
+        "query": {
+          "required": false,
+          "description": "New Sourcegraph search query",
+          "type": "string",
+          "positional": false
+        },
+        "description": {
+          "required": false,
+          "description": "New human-readable description",
+          "type": "string",
+          "positional": false
+        },
+        "interval": {
+          "required": false,
+          "description": "New collection interval in hours",
           "type": "string",
           "positional": false
         }
@@ -38,7 +67,7 @@
     "collect": {
       "description": "Run a collection for a specific insight or all insights",
       "args": {
-        "--name": {
+        "name": {
           "required": false,
           "description": "Specific insight to collect (if omitted, collects all)",
           "type": "string",
@@ -46,12 +75,12 @@
         }
       }
     },
-    "collect-all": {
+    "collect_all": {
       "description": "Collect data for all insights",
       "args": {}
     },
-    "trend": {
-      "description": "Show the trend for an insight with ASCII sparkline chart",
+    "series_points": {
+      "description": "Show the time-series data points for an insight with ASCII sparkline chart — aligns with InsightsSeries.points",
       "args": {
         "name": {
           "positional": true,
@@ -59,13 +88,13 @@
           "description": "Name of the insight",
           "type": "string"
         },
-        "--days": {
+        "days": {
           "required": false,
           "description": "Number of days to show (default: 30)",
           "type": "string",
           "positional": false
         },
-        "--format": {
+        "format": {
           "required": false,
           "description": "Output format: text or json (default: text)",
           "type": "string",
@@ -88,7 +117,7 @@
           "description": "Second insight name",
           "type": "string"
         },
-        "--days": {
+        "days": {
           "required": false,
           "description": "Number of days to show (default: 30)",
           "type": "string",
@@ -96,16 +125,16 @@
         }
       }
     },
-    "snapshot": {
-      "description": "Get current values for all insights without storing results",
+    "live_preview": {
+      "description": "Get current values for all insights without storing results — aligns with searchInsightLivePreview",
       "args": {}
     },
-    "list": {
-      "description": "List all insights with their status",
+    "list_views": {
+      "description": "List all insight views with their status — aligns with insightViews",
       "args": {}
     },
-    "delete": {
-      "description": "Delete an insight and all its collected data",
+    "delete_view": {
+      "description": "Delete an insight view and all its collected data — aligns with deleteInsightView",
       "args": {
         "name": {
           "positional": true,
@@ -115,8 +144,68 @@
         }
       }
     },
+    "validate_query": {
+      "description": "Validate a search query for use in insights — aligns with validateScopedInsightQuery",
+      "args": {
+        "query": {
+          "positional": true,
+          "required": true,
+          "description": "Sourcegraph search query to validate",
+          "type": "string"
+        }
+      }
+    },
+    "create_dashboard": {
+      "description": "Create a named dashboard grouping insights — aligns with createInsightsDashboard",
+      "args": {
+        "name": {
+          "required": true,
+          "description": "Dashboard name",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "list_dashboards": {
+      "description": "List all dashboards — aligns with insightsDashboards",
+      "args": {}
+    },
+    "add_to_dashboard": {
+      "description": "Add an insight view to a dashboard — aligns with addInsightViewToDashboard",
+      "args": {
+        "insight": {
+          "required": true,
+          "description": "Insight name to add",
+          "type": "string",
+          "positional": false
+        },
+        "dashboard": {
+          "required": true,
+          "description": "Dashboard name to add the insight to",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "remove_from_dashboard": {
+      "description": "Remove an insight view from a dashboard — aligns with removeInsightViewFromDashboard",
+      "args": {
+        "insight": {
+          "required": true,
+          "description": "Insight name to remove",
+          "type": "string",
+          "positional": false
+        },
+        "dashboard": {
+          "required": true,
+          "description": "Dashboard name to remove the insight from",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
     "health": {
-      "description": "Check Sourcegraph connectivity and database state",
+      "description": "Check Sourcegraph connectivity, Vault credentials, and database state",
       "args": {}
     }
   }

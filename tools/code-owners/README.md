@@ -4,7 +4,7 @@ A Toolshed native tool that parses CODEOWNERS files from Sourcegraph-indexed rep
 
 ## Overview
 
-`code-owners` syncs CODEOWNERS rules from your repositories into a local SQLite database, then lets you query ownership, search by owner, and find files with no coverage — all without cloning repos locally.
+`code-owners` syncs CODEOWNERS rules from your repositories into a local SQLite database, then lets you query ownership, search by owner, create/update/delete CODEOWNERS entries, and find files with no coverage — all without cloning repos locally.
 
 ## Prerequisites
 
@@ -42,15 +42,47 @@ code-owners sync --repo github.com/org/repo
 
 Looks for CODEOWNERS in standard locations: `CODEOWNERS`, `.github/CODEOWNERS`, `.gitlab/CODEOWNERS`, `docs/CODEOWNERS`.
 
-### query
+### get
 
-Find who owns a specific file.
+Find who owns a specific file. Aligns with `src codeowners get`.
 
 ```bash
-code-owners query github.com/org/repo src/api/handler.go
+code-owners get github.com/org/repo src/api/handler.go
 ```
 
 Applies CODEOWNERS rules in order; the last matching rule wins (per the CODEOWNERS spec).
+
+### create
+
+Create/upload a CODEOWNERS file for a repo. Aligns with `src codeowners create`.
+
+```bash
+code-owners create github.com/org/repo --file ./CODEOWNERS
+code-owners create github.com/org/repo --content '*.go @backend-team'
+```
+
+Parses and validates the content, then stores rules in the local SQLite database. Fails if the repo already exists (use `update` or `delete` first).
+
+### update
+
+Update an existing CODEOWNERS file for a repo. Aligns with `src codeowners update`.
+
+```bash
+code-owners update github.com/org/repo --file ./CODEOWNERS
+code-owners update github.com/org/repo --content '*.go @backend-team'
+```
+
+Replaces all existing rules for the repo with the new content. Fails if the repo does not exist (use `create` first).
+
+### delete
+
+Delete a CODEOWNERS file entry and all its rules for a repo. Aligns with `src codeowners delete`.
+
+```bash
+code-owners delete github.com/org/repo
+```
+
+Removes all rules and the repo entry from the local SQLite database.
 
 ### search
 
@@ -121,3 +153,8 @@ The tool implements simplified gitignore-style glob matching:
 | `/src/`       | Everything under `src/` at the repo root       |
 | `src/**/*.go` | Any `.go` file nested under `src/`             |
 | `docs/*`      | Files directly in any `docs/` directory        |
+
+## Migration from Previous Version
+
+- The `query` command has been renamed to `get` to align with Sourcegraph's `src codeowners get` CLI.
+- New commands `create`, `update`, and `delete` have been added to match the `src codeowners` CLI surface.

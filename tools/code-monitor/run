@@ -3,6 +3,7 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # code-monitor — watch for new commits via Sourcegraph and send alerts
+# Aligned with Sourcegraph Enterprise Code Monitoring GraphQL API naming
 # ---------------------------------------------------------------------------
 
 DB_DIR="$HOME/.toolshed/data"
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS monitors (
     webhook TEXT,
     interval_min INTEGER DEFAULT 15,
     last_checked TEXT,
+    enabled INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS alerts (
@@ -33,6 +35,13 @@ CREATE TABLE IF NOT EXISTS alerts (
     FOREIGN KEY (monitor_name) REFERENCES monitors(name)
 );
 SQL
+
+  # Gracefully add enabled column if migrating from older schema
+  local has_enabled
+  has_enabled=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM pragma_table_info('monitors') WHERE name='enabled';")
+  if [[ "$has_enabled" -eq 0 ]]; then
+    sqlite3 "$DB_PATH" "ALTER TABLE monitors ADD COLUMN enabled INTEGER DEFAULT 1;"
+  fi
 }
 
 load_credentials() {
@@ -109,6 +118,10 @@ fire_webhook() {
   }
 }
 
+sql_escape() {
+  echo "$1" | sed "s/'/''/g"
+}
+
 # ---- commands -------------------------------------------------------------
 
 cmd_create() {
@@ -134,20 +147,113 @@ cmd_create() {
   ensure_db
 
   local existing
-  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$name';")
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(sql_escape "$name")';")
   if [[ "$existing" -gt 0 ]]; then
     echo "ERROR: monitor '$name' already exists" >&2; exit 1
   fi
 
-  sqlite3 "$DB_PATH" "INSERT INTO monitors (name, query, webhook, interval_min) VALUES ('$(echo "$name" | sed "s/'/''/g")', '$(echo "$query" | sed "s/'/''/g")', '$(echo "$webhook" | sed "s/'/''/g")', $interval);"
+  sqlite3 "$DB_PATH" "INSERT INTO monitors (name, query, webhook, interval_min, enabled) VALUES ('$(sql_escape "$name")', '$(sql_escape "$query")', '$(sql_escape "$webhook")', $interval, 1);"
 
   echo "Created monitor '$name'"
   echo "  Query:    $query"
   echo "  Webhook:  ${webhook:-<none>}"
   echo "  Interval: ${interval}m"
+  echo "  Enabled:  true"
 }
 
-cmd_check() {
+cmd_update() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "ERROR: monitor name is required" >&2; exit 1
+  fi
+  shift
+
+  local query="" webhook="" interval=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --query)    query="$2";    shift 2 ;;
+      --webhook)  webhook="$2";  shift 2 ;;
+      --interval) interval="$2"; shift 2 ;;
+      *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(sql_escape "$name")';")
+  if [[ "$existing" -eq 0 ]]; then
+    echo "ERROR: monitor '$name' not found" >&2; exit 1
+  fi
+
+  local updates=()
+  if [[ -n "$query" ]]; then
+    updates+=("query = '$(sql_escape "$query")'")
+  fi
+  if [[ -n "$webhook" ]]; then
+    updates+=("webhook = '$(sql_escape "$webhook")'")
+  fi
+  if [[ -n "$interval" ]]; then
+    updates+=("interval_min = $interval")
+  fi
+
+  if [[ ${#updates[@]} -eq 0 ]]; then
+    echo "ERROR: at least one of --query, --webhook, or --interval is required" >&2; exit 1
+  fi
+
+  local set_clause
+  set_clause=$(IFS=', '; echo "${updates[*]}")
+
+  sqlite3 "$DB_PATH" "UPDATE monitors SET $set_clause WHERE name = '$(sql_escape "$name")';"
+
+  echo "Updated monitor '$name'"
+  [[ -n "$query" ]]    && echo "  Query:    $query"
+  [[ -n "$webhook" ]]  && echo "  Webhook:  $webhook"
+  [[ -n "$interval" ]] && echo "  Interval: ${interval}m"
+}
+
+cmd_toggle() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "ERROR: monitor name is required" >&2; exit 1
+  fi
+  shift
+
+  local enabled=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --enabled) enabled="$2"; shift 2 ;;
+      *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if [[ -z "$enabled" ]]; then
+    echo "ERROR: --enabled is required (true or false)" >&2; exit 1
+  fi
+
+  local enabled_int
+  case "$enabled" in
+    true)  enabled_int=1 ;;
+    false) enabled_int=0 ;;
+    *) echo "ERROR: --enabled must be 'true' or 'false'" >&2; exit 1 ;;
+  esac
+
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(sql_escape "$name")';")
+  if [[ "$existing" -eq 0 ]]; then
+    echo "ERROR: monitor '$name' not found" >&2; exit 1
+  fi
+
+  sqlite3 "$DB_PATH" "UPDATE monitors SET enabled = $enabled_int WHERE name = '$(sql_escape "$name")';"
+
+  echo "Monitor '$name' is now $([ "$enabled_int" -eq 1 ] && echo 'enabled' || echo 'disabled')."
+}
+
+cmd_trigger_check() {
   local name="" since=""
 
   while [[ $# -gt 0 ]]; do
@@ -162,34 +268,39 @@ cmd_check() {
   load_credentials
 
   if [[ -n "$name" ]]; then
-    check_single_monitor "$name" "$since"
+    trigger_check_single "$name" "$since"
   else
     local monitors
-    monitors=$(sqlite3 "$DB_PATH" "SELECT name FROM monitors;")
+    monitors=$(sqlite3 "$DB_PATH" "SELECT name FROM monitors WHERE enabled = 1;")
     if [[ -z "$monitors" ]]; then
-      echo "No monitors configured."
+      echo "No enabled monitors configured."
       return 0
     fi
     while IFS= read -r mon; do
-      check_single_monitor "$mon" "$since"
+      trigger_check_single "$mon" "$since"
     done <<< "$monitors"
   fi
 }
 
-check_single_monitor() {
+trigger_check_single() {
   local name="$1" since_override="$2"
 
   local row
   row=$(sqlite3 -separator '|' "$DB_PATH" \
-    "SELECT query, webhook, last_checked FROM monitors WHERE name = '$(echo "$name" | sed "s/'/''/g")';")
+    "SELECT query, webhook, last_checked, enabled FROM monitors WHERE name = '$(sql_escape "$name")';")
 
   if [[ -z "$row" ]]; then
     echo "ERROR: monitor '$name' not found" >&2
     return 1
   fi
 
-  local query webhook last_checked
-  IFS='|' read -r query webhook last_checked <<< "$row"
+  local query webhook last_checked enabled
+  IFS='|' read -r query webhook last_checked enabled <<< "$row"
+
+  if [[ "$enabled" -eq 0 ]]; then
+    echo "Skipping disabled monitor '$name'."
+    return 0
+  fi
 
   local since
   if [[ -n "$since_override" ]]; then
@@ -215,13 +326,13 @@ check_single_monitor() {
   local now
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  sqlite3 "$DB_PATH" "UPDATE monitors SET last_checked = '$now' WHERE name = '$(echo "$name" | sed "s/'/''/g")';"
+  sqlite3 "$DB_PATH" "UPDATE monitors SET last_checked = '$now' WHERE name = '$(sql_escape "$name")';"
 
   if [[ "$match_count" -gt 0 ]]; then
     local matches
     matches=$(parse_matches "$raw_response")
 
-    sqlite3 "$DB_PATH" "INSERT INTO alerts (monitor_name, match_count, matches) VALUES ('$(echo "$name" | sed "s/'/''/g")', $match_count, '$(echo "$matches" | sed "s/'/''/g")');"
+    sqlite3 "$DB_PATH" "INSERT INTO alerts (monitor_name, match_count, matches) VALUES ('$(sql_escape "$name")', $match_count, '$(echo "$matches" | sed "s/'/''/g")');"
 
     echo "  Found $match_count new match(es)"
 
@@ -253,20 +364,20 @@ check_single_monitor() {
   fi
 }
 
-cmd_check_all() {
+cmd_trigger_check_all() {
   ensure_db
   load_credentials
 
   local monitors
-  monitors=$(sqlite3 "$DB_PATH" "SELECT name FROM monitors;")
+  monitors=$(sqlite3 "$DB_PATH" "SELECT name FROM monitors WHERE enabled = 1;")
   if [[ -z "$monitors" ]]; then
-    echo "No monitors configured."
+    echo "No enabled monitors configured."
     return 0
   fi
 
   local count=0
   while IFS= read -r mon; do
-    check_single_monitor "$mon" ""
+    trigger_check_single "$mon" ""
     count=$((count + 1))
   done <<< "$monitors"
 
@@ -279,7 +390,7 @@ cmd_list() {
 
   local rows
   rows=$(sqlite3 -separator '|' "$DB_PATH" \
-    "SELECT m.name, m.query, m.last_checked, m.interval_min, m.webhook,
+    "SELECT m.name, m.query, m.last_checked, m.interval_min, m.webhook, m.enabled,
             COALESCE((SELECT match_count FROM alerts WHERE monitor_name = m.name ORDER BY fired_at DESC LIMIT 1), 0)
      FROM monitors m ORDER BY m.name;")
 
@@ -288,18 +399,20 @@ cmd_list() {
     return 0
   fi
 
-  printf "%-20s %-40s %-22s %6s %7s %s\n" "NAME" "QUERY" "LAST CHECKED" "ALERTS" "INTV" "WEBHOOK"
-  printf "%-20s %-40s %-22s %6s %7s %s\n" "----" "-----" "------------" "------" "----" "-------"
+  printf "%-20s %-35s %-22s %6s %7s %3s %s\n" "NAME" "QUERY" "LAST CHECKED" "ALERTS" "INTV" "ON" "WEBHOOK"
+  printf "%-20s %-35s %-22s %6s %7s %3s %s\n" "----" "-----" "------------" "------" "----" "--" "-------"
 
-  while IFS='|' read -r name query last_checked interval webhook last_alert_count; do
+  while IFS='|' read -r name query last_checked interval webhook enabled last_alert_count; do
     local wh_flag="n"
     [[ -n "$webhook" ]] && wh_flag="y"
+    local on_flag="y"
+    [[ "$enabled" -eq 0 ]] && on_flag="n"
     local display_query="$query"
-    if [[ ${#display_query} -gt 40 ]]; then
-      display_query="${display_query:0:37}..."
+    if [[ ${#display_query} -gt 35 ]]; then
+      display_query="${display_query:0:32}..."
     fi
-    printf "%-20s %-40s %-22s %6s %5sm %s\n" \
-      "$name" "$display_query" "${last_checked:-never}" "$last_alert_count" "$interval" "$wh_flag"
+    printf "%-20s %-35s %-22s %6s %5sm %3s %s\n" \
+      "$name" "$display_query" "${last_checked:-never}" "$last_alert_count" "$interval" "$on_flag" "$wh_flag"
   done <<< "$rows"
 }
 
@@ -313,18 +426,18 @@ cmd_delete() {
   ensure_db
 
   local existing
-  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(echo "$name" | sed "s/'/''/g")';")
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(sql_escape "$name")';")
   if [[ "$existing" -eq 0 ]]; then
     echo "ERROR: monitor '$name' not found" >&2; exit 1
   fi
 
-  sqlite3 "$DB_PATH" "DELETE FROM alerts WHERE monitor_name = '$(echo "$name" | sed "s/'/''/g")';"
-  sqlite3 "$DB_PATH" "DELETE FROM monitors WHERE name = '$(echo "$name" | sed "s/'/''/g")';"
+  sqlite3 "$DB_PATH" "DELETE FROM alerts WHERE monitor_name = '$(sql_escape "$name")';"
+  sqlite3 "$DB_PATH" "DELETE FROM monitors WHERE name = '$(sql_escape "$name")';"
 
-  echo "Deleted monitor '$name' and its alert history."
+  echo "Deleted monitor '$name' and its event history."
 }
 
-cmd_history() {
+cmd_events() {
   local name="${1:-}" limit="20"
 
   shift || true
@@ -342,7 +455,7 @@ cmd_history() {
   ensure_db
 
   local existing
-  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(echo "$name" | sed "s/'/''/g")';")
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(sql_escape "$name")';")
   if [[ "$existing" -eq 0 ]]; then
     echo "ERROR: monitor '$name' not found" >&2; exit 1
   fi
@@ -350,15 +463,15 @@ cmd_history() {
   local rows
   rows=$(sqlite3 -separator '|' "$DB_PATH" \
     "SELECT fired_at, match_count, matches FROM alerts
-     WHERE monitor_name = '$(echo "$name" | sed "s/'/''/g")'
+     WHERE monitor_name = '$(sql_escape "$name")'
      ORDER BY fired_at DESC LIMIT $limit;")
 
   if [[ -z "$rows" ]]; then
-    echo "No alerts for monitor '$name'."
+    echo "No trigger events for monitor '$name'."
     return 0
   fi
 
-  echo "Recent alerts for '$name':"
+  echo "Recent trigger events for '$name':"
   echo ""
 
   while IFS='|' read -r fired_at match_count matches; do
@@ -367,6 +480,67 @@ cmd_history() {
       echo "$matches" | jq -r '.[:3][] | "    - \(.repo) \(.file // "") \(if .line then "L\(.line)" else "" end): \(.preview)"' 2>/dev/null || true
     fi
   done <<< "$rows"
+}
+
+cmd_test_action() {
+  local name="${1:-}"
+
+  if [[ -z "$name" ]]; then
+    echo "ERROR: monitor name is required" >&2; exit 1
+  fi
+
+  ensure_db
+
+  local row
+  row=$(sqlite3 -separator '|' "$DB_PATH" \
+    "SELECT webhook FROM monitors WHERE name = '$(sql_escape "$name")';")
+
+  if [[ -z "$row" ]]; then
+    echo "ERROR: monitor '$name' not found" >&2; exit 1
+  fi
+
+  local webhook="$row"
+
+  if [[ -z "$webhook" ]]; then
+    echo "ERROR: monitor '$name' has no webhook configured" >&2; exit 1
+  fi
+
+  local payload
+  payload=$(jq -n \
+    --arg monitor "$name" \
+    --arg checked_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      monitor: $monitor,
+      query: "(test action)",
+      match_count: 0,
+      matches: [],
+      checked_at: $checked_at,
+      test: true
+    }')
+
+  echo "Sending test webhook to $webhook ..."
+  fire_webhook "$webhook" "$payload"
+  echo "Test webhook sent for monitor '$name'."
+}
+
+cmd_reset() {
+  local name="${1:-}"
+
+  if [[ -z "$name" ]]; then
+    echo "ERROR: monitor name is required" >&2; exit 1
+  fi
+
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(sql_escape "$name")';")
+  if [[ "$existing" -eq 0 ]]; then
+    echo "ERROR: monitor '$name' not found" >&2; exit 1
+  fi
+
+  sqlite3 "$DB_PATH" "UPDATE monitors SET last_checked = NULL WHERE name = '$(sql_escape "$name")';"
+
+  echo "Reset trigger timestamps for monitor '$name'. Next check will re-evaluate from scratch."
 }
 
 cmd_health() {
@@ -385,7 +559,7 @@ cmd_health() {
   echo "Checking Sourcegraph connectivity..."
   if [[ -n "${SRC_URL:-}" && -n "${SRC_TOKEN:-}" ]]; then
     local resp
-    resp=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w "%{http_code}" \
+    resp=$(curl -sf -o /dev/null -w "%{http_code}" \
       -H "Authorization: token $SRC_TOKEN" \
       "$SRC_URL/.api/graphql" \
       -d '{"query":"{ currentUser { username } }"}' 2>/dev/null) || resp="000"
@@ -403,12 +577,14 @@ cmd_health() {
   # Check DB
   echo "Checking database..."
   ensure_db
-  local monitor_count alert_count
+  local monitor_count alert_count enabled_count disabled_count
   monitor_count=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors;")
   alert_count=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM alerts;")
+  enabled_count=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE enabled = 1;")
+  disabled_count=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE enabled = 0;")
   echo "  Database: OK ($DB_PATH)"
-  echo "  Monitors: $monitor_count"
-  echo "  Alerts:   $alert_count"
+  echo "  Monitors: $monitor_count ($enabled_count enabled, $disabled_count disabled)"
+  echo "  Events:   $alert_count"
 
   if [[ "$errors" -gt 0 ]]; then
     echo ""
@@ -426,24 +602,32 @@ COMMAND="${1:-}"
 shift || true
 
 case "$COMMAND" in
-  create)    cmd_create "$@" ;;
-  check)     cmd_check "$@" ;;
-  check-all) cmd_check_all "$@" ;;
-  list)      cmd_list "$@" ;;
-  delete)    cmd_delete "$@" ;;
-  history)   cmd_history "$@" ;;
-  health)    cmd_health "$@" ;;
+  create)            cmd_create "$@" ;;
+  update)            cmd_update "$@" ;;
+  delete)            cmd_delete "$@" ;;
+  toggle)            cmd_toggle "$@" ;;
+  trigger_check)     cmd_trigger_check "$@" ;;
+  trigger_check_all) cmd_trigger_check_all "$@" ;;
+  list)              cmd_list "$@" ;;
+  events)            cmd_events "$@" ;;
+  test_action)       cmd_test_action "$@" ;;
+  reset)             cmd_reset "$@" ;;
+  health)            cmd_health "$@" ;;
   *)
     echo "Usage: code-monitor <command> [args]"
     echo ""
     echo "Commands:"
-    echo "  create      Create a new code monitor"
-    echo "  check       Run a check for a specific monitor (or all)"
-    echo "  check-all   Run checks for all active monitors"
-    echo "  list        List all monitors with their status"
-    echo "  delete      Delete a monitor"
-    echo "  history     Show recent alerts for a monitor"
-    echo "  health      Check Sourcegraph connectivity and DB state"
+    echo "  create            Create a new code monitor"
+    echo "  update            Update a monitor's query, webhook, or interval"
+    echo "  delete            Delete a monitor"
+    echo "  toggle            Enable or disable a monitor"
+    echo "  trigger_check     Evaluate trigger for a specific monitor (or all)"
+    echo "  trigger_check_all Evaluate triggers for all enabled monitors"
+    echo "  list              List all monitors with their status"
+    echo "  events            Show recent trigger events for a monitor"
+    echo "  test_action       Send a test webhook for a monitor"
+    echo "  reset             Reset trigger timestamps (re-evaluate from scratch)"
+    echo "  health            Check Sourcegraph connectivity and DB state"
     exit 1
     ;;
 esac

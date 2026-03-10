@@ -3,6 +3,16 @@ set -euo pipefail
 
 ###############################################################################
 # batch-changes — multi-repo change automation via Sourcegraph + GitLab
+#
+# Commands aligned with `src batch` CLI naming:
+#   new          Create a new batch change spec
+#   apply        Execute a batch change (clone, script, push, open MRs)
+#   preview      Dry-run — show what apply would do without touching anything
+#   validate     Check that a spec exists and is well-formed
+#   repositories List repos that would be affected without running anything
+#   status       Show MR status for an executed batch change
+#   list         List all batch change specs
+#   health       Check service connectivity
 ###############################################################################
 
 DATA_DIR="$HOME/.toolshed/data/batch-changes"
@@ -69,6 +79,38 @@ sourcegraph_search_repos() {
 }
 
 # ---------------------------------------------------------------------------
+# Sourcegraph: validate that a search query is syntactically valid
+# ---------------------------------------------------------------------------
+
+sourcegraph_validate_query() {
+  local query="$1"
+  local gql_query
+  gql_query=$(jq -n --arg q "$query" '{
+    query: "query($q: String!) { search(query: $q) { results { matchCount } } }",
+    variables: { q: $q }
+  }')
+
+  local response
+  response=$(curl -sf \
+    -H "Authorization: token $SRC_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$gql_query" \
+    "$SRC_URL/.api/graphql" 2>/dev/null) || {
+    echo "ERROR: could not reach Sourcegraph to validate query" >&2
+    return 1
+  }
+
+  local errors
+  errors=$(echo "$response" | jq -r '.errors // empty | .[].message' 2>/dev/null)
+  if [[ -n "$errors" ]]; then
+    echo "ERROR: Sourcegraph query is invalid:" >&2
+    echo "$errors" >&2
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # GitLab helpers
 # ---------------------------------------------------------------------------
 
@@ -129,7 +171,7 @@ parse_repo_path() {
 # COMMANDS
 # ===========================================================================
 
-cmd_create() {
+cmd_new() {
   local name="" description="" query="" script="" branch="" commit_msg=""
 
   while [[ $# -gt 0 ]]; do
@@ -175,7 +217,7 @@ cmd_create() {
   jq . "$spec_file"
 }
 
-cmd_run() {
+cmd_apply() {
   local name="" dry_run=false
 
   while [[ $# -gt 0 ]]; do
@@ -268,7 +310,7 @@ cmd_run() {
 
     # Run script
     echo "  Running script ..."
-    if ! (cd "$repo_clone_dir" && eval "$script") 2>&1; then
+    if ! (cd "$repo_clone_dir" && bash -c "$script") 2>&1; then
       echo "  ERROR: script failed for $repo_path" >&2
       jq --arg repo "$repo_path" --arg status "script_failed" \
         '. += [{"repo": $repo, "status": $status}]' "$results_file" > "$results_file.tmp" \
@@ -355,6 +397,146 @@ cmd_run() {
   echo "Batch change '$name' completed: $success_count succeeded, $fail_count failed."
   echo "Results saved to: $results_file"
   jq . "$results_file"
+}
+
+cmd_preview() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) echo "ERROR: unknown flag: $1" >&2; return 1 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: name is required" >&2; return 1; fi
+
+  # Delegate to apply with --dry-run forced on
+  cmd_apply --dry-run "$name"
+}
+
+cmd_validate() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) echo "ERROR: unknown flag: $1" >&2; return 1 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: name is required" >&2; return 1; fi
+
+  local spec_file="$DATA_DIR/${name}.json"
+  local ok=true
+
+  # 1. Check spec file exists
+  echo "Checking spec file: $spec_file"
+  if [[ ! -f "$spec_file" ]]; then
+    echo "  FAIL: spec file does not exist" >&2
+    return 1
+  fi
+  echo "  OK: spec file exists"
+
+  # 2. Check it is valid JSON
+  if ! jq empty "$spec_file" 2>/dev/null; then
+    echo "  FAIL: spec file is not valid JSON" >&2
+    return 1
+  fi
+  echo "  OK: valid JSON"
+
+  # 3. Check required fields: name, query, script
+  local spec_name spec_query spec_script
+  spec_name=$(jq -r '.name // empty' "$spec_file")
+  spec_query=$(jq -r '.query // empty' "$spec_file")
+  spec_script=$(jq -r '.script // empty' "$spec_file")
+
+  if [[ -z "$spec_name" ]]; then
+    echo "  FAIL: missing required field 'name'" >&2
+    ok=false
+  else
+    echo "  OK: name = $spec_name"
+  fi
+
+  if [[ -z "$spec_query" ]]; then
+    echo "  FAIL: missing required field 'query'" >&2
+    ok=false
+  else
+    echo "  OK: query = $spec_query"
+  fi
+
+  if [[ -z "$spec_script" ]]; then
+    echo "  FAIL: missing required field 'script'" >&2
+    ok=false
+  else
+    echo "  OK: script = $spec_script"
+  fi
+
+  # 4. Validate the Sourcegraph query syntax by running the search
+  if [[ -n "$spec_query" ]]; then
+    echo "Validating Sourcegraph query syntax ..."
+    if load_sourcegraph_creds 2>/dev/null; then
+      if sourcegraph_validate_query "$spec_query"; then
+        echo "  OK: Sourcegraph query is valid"
+      else
+        ok=false
+      fi
+    else
+      echo "  WARN: could not connect to Sourcegraph to validate query (credentials unavailable)"
+    fi
+  fi
+
+  if [[ "$ok" == "true" ]]; then
+    echo ""
+    echo "Validation passed."
+  else
+    echo ""
+    echo "Validation failed." >&2
+    return 1
+  fi
+}
+
+cmd_repositories() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) echo "ERROR: unknown flag: $1" >&2; return 1 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: name is required" >&2; return 1; fi
+
+  local spec_file="$DATA_DIR/${name}.json"
+  if [[ ! -f "$spec_file" ]]; then
+    echo "ERROR: batch change '$name' not found at $spec_file" >&2
+    return 1
+  fi
+
+  local query
+  query=$(jq -r '.query' "$spec_file")
+
+  load_sourcegraph_creds
+
+  echo "Searching Sourcegraph for repos matching: $query"
+  local repos
+  repos=$(sourcegraph_search_repos "$query")
+
+  if [[ -z "$repos" ]]; then
+    echo "No repos matched the query."
+    return 0
+  fi
+
+  local repo_count
+  repo_count=$(echo "$repos" | wc -l | tr -d ' ')
+  echo "Found $repo_count repo(s):"
+  echo ""
+  echo "$repos" | while IFS= read -r repo; do
+    local repo_path
+    repo_path=$(parse_repo_path "$repo")
+    echo "  $repo_path"
+  done
 }
 
 cmd_status() {
@@ -498,20 +680,26 @@ COMMAND="${1:-}"
 shift || true
 
 case "$COMMAND" in
-  create) cmd_create "$@" ;;
-  run)    cmd_run "$@" ;;
-  status) cmd_status "$@" ;;
-  list)   cmd_list "$@" ;;
-  health) cmd_health "$@" ;;
+  new)          cmd_new "$@" ;;
+  apply)        cmd_apply "$@" ;;
+  preview)      cmd_preview "$@" ;;
+  validate)     cmd_validate "$@" ;;
+  repositories) cmd_repositories "$@" ;;
+  status)       cmd_status "$@" ;;
+  list)         cmd_list "$@" ;;
+  health)       cmd_health "$@" ;;
   *)
     echo "Usage: batch-changes <command> [args]"
     echo ""
     echo "Commands:"
-    echo "  create   Create a new batch change spec"
-    echo "  run      Execute a batch change"
-    echo "  status   Show status of a batch change"
-    echo "  list     List all batch changes"
-    echo "  health   Check service connectivity"
+    echo "  new          Create a new batch change spec"
+    echo "  apply        Execute a batch change (clone, script, push, open MRs)"
+    echo "  preview      Dry-run a batch change (show what apply would do)"
+    echo "  validate     Validate a batch change spec"
+    echo "  repositories List repos that would be affected"
+    echo "  status       Show status of a batch change"
+    echo "  list         List all batch changes"
+    echo "  health       Check service connectivity"
     exit 1
     ;;
 esac

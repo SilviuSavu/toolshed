@@ -6,40 +6,40 @@
   "max_output": 50000,
   "health": "batch-changes health",
   "commands": {
-    "create": {
+    "new": {
       "description": "Create a new batch change spec (saved locally, not yet executed)",
       "args": {
-        "--name": {
+        "name": {
           "required": true,
           "description": "Batch change name (used as identifier)",
           "type": "string",
           "positional": false
         },
-        "--description": {
+        "description": {
           "required": false,
           "description": "Human-readable description of the batch change",
           "type": "string",
           "positional": false
         },
-        "--query": {
+        "query": {
           "required": true,
           "description": "Sourcegraph search query to find target repos (e.g. \"repo:myorg/ file:package.json lodash\")",
           "type": "string",
           "positional": false
         },
-        "--script": {
+        "script": {
           "required": true,
           "description": "Shell command to run inside each repo clone (e.g. \"sed -i 's/old/new/g' file.txt\")",
           "type": "string",
           "positional": false
         },
-        "--branch": {
+        "branch": {
           "required": false,
           "description": "Branch name to create in each repo (default: batch/{name})",
           "type": "string",
           "positional": false
         },
-        "--commit-msg": {
+        "commit-msg": {
           "required": false,
           "description": "Commit message for each repo (default: \"batch-change: {name}\")",
           "type": "string",
@@ -47,7 +47,7 @@
         }
       }
     },
-    "run": {
+    "apply": {
       "description": "Execute a batch change: clone repos, apply script, commit, push, and open GitLab MRs",
       "args": {
         "name": {
@@ -56,11 +56,44 @@
           "description": "Name of the batch change to execute",
           "type": "string"
         },
-        "--dry-run": {
+        "dry-run": {
           "required": false,
           "description": "Show what would happen without making any changes",
           "type": "string",
           "positional": false
+        }
+      }
+    },
+    "preview": {
+      "description": "Dry-run a batch change: show which repos match and what would happen without making any changes",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change to preview",
+          "type": "string"
+        }
+      }
+    },
+    "validate": {
+      "description": "Validate a batch change spec exists and is well-formed (required fields, valid Sourcegraph query)",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change to validate",
+          "type": "string"
+        }
+      }
+    },
+    "repositories": {
+      "description": "List repos that would be affected by a batch change without cloning or changing anything",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change whose target repos to list",
+          "type": "string"
         }
       }
     },

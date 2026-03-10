@@ -1,6 +1,6 @@
 {
   "name": "code-owners",
-  "description": "Parse CODEOWNERS files from repositories and resolve file ownership — sync rules from Sourcegraph-indexed repos, query owners for paths, search by owner, and find unowned files.",
+  "description": "CODEOWNERS management — sync, query ownership, search by owner, create/update/delete entries, find unowned files",
   "category": "developer-tools",
   "type": "native",
   "max_output": 50000,
@@ -9,7 +9,7 @@
     "sync": {
       "description": "Fetch and parse CODEOWNERS files from all indexed repos (or a specific repo)",
       "args": {
-        "--repo": {
+        "repo": {
           "required": false,
           "description": "Sync a specific repo only (e.g. \"github.com/org/repo\")",
           "type": "string",
@@ -17,7 +17,7 @@
         }
       }
     },
-    "query": {
+    "get": {
       "description": "Find owners for a file path in a repo (last matching CODEOWNERS rule wins)",
       "args": {
         "repo": {
@@ -34,6 +34,63 @@
         }
       }
     },
+    "create": {
+      "description": "Create/upload a CODEOWNERS file for a repo — parses content, validates format, and stores rules in SQLite",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name (e.g. \"github.com/org/repo\")",
+          "type": "string"
+        },
+        "file": {
+          "required": false,
+          "description": "Path to a local CODEOWNERS file to upload",
+          "type": "string",
+          "positional": false
+        },
+        "content": {
+          "required": false,
+          "description": "CODEOWNERS content as a string (used if --file is not provided)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "update": {
+      "description": "Update an existing CODEOWNERS file for a repo — replaces all existing rules with new content",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name (e.g. \"github.com/org/repo\")",
+          "type": "string"
+        },
+        "file": {
+          "required": false,
+          "description": "Path to the updated CODEOWNERS file",
+          "type": "string",
+          "positional": false
+        },
+        "content": {
+          "required": false,
+          "description": "Updated CODEOWNERS content as a string (used if --file is not provided)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "delete": {
+      "description": "Delete a CODEOWNERS file entry and all its rules for a repo from the local database",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name to remove from the database",
+          "type": "string"
+        }
+      }
+    },
     "search": {
       "description": "Find all patterns and repos owned by a person or team",
       "args": {
@@ -43,7 +100,7 @@
           "description": "Owner handle (e.g. @username or @org/team)",
           "type": "string"
         },
-        "--repo": {
+        "repo": {
           "required": false,
           "description": "Limit search to a specific repo",
           "type": "string",
@@ -58,7 +115,7 @@
     "list-owners": {
       "description": "List all known owners across all repos with rule counts",
       "args": {
-        "--repo": {
+        "repo": {
           "required": false,
           "description": "Limit to a specific repo",
           "type": "string",
