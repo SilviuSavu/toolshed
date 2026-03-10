@@ -6,6 +6,8 @@ set -euo pipefail
 #
 # Spawns an LLM research loop that combines keyword search, semantic search,
 # symbol navigation, call graphs, and file reads to answer complex questions.
+#
+# Providers: openrouter (default), zai
 ###############################################################################
 
 DB_DIR="$HOME/.toolshed/data"
@@ -15,40 +17,85 @@ VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
 VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
 MAX_STEPS=5
 MAX_TOOL_OUTPUT=4000
-MODEL="${DEEPSEARCH_MODEL:-qwen/qwen3-coder}"
+
+# Provider defaults
+PROVIDER="${DEEPSEARCH_PROVIDER:-zai}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# Vault + OpenRouter
+# Vault + LLM provider
 # ---------------------------------------------------------------------------
-load_api_key() {
+LLM_API_KEY=""
+LLM_BASE_URL=""
+LLM_MODEL=""
+
+load_provider() {
+    local provider="$1"
+    local vault_path="" default_model="" default_url=""
+
+    case "$provider" in
+        openrouter)
+            default_model="qwen/qwen3-coder"
+            vault_path="openrouter"
+            default_url="https://openrouter.ai/api/v1/chat/completions"
+            ;;
+        zai)
+            default_model="glm-5"
+            vault_path="zai"
+            default_url="https://api.z.ai/api/coding/paas/v4/chat/completions"
+            ;;
+        *)
+            die "unknown provider: $provider (available: openrouter, zai)"
+            ;;
+    esac
+
+    LLM_MODEL="${DEEPSEARCH_MODEL:-$default_model}"
+    LLM_BASE_URL="$default_url"
+
     local vault_data
     vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" \
-        "$VAULT_ADDR/v1/secret/data/openrouter") \
-        || die "cannot reach Vault"
-    OPENROUTER_API_KEY=$(echo "$vault_data" | jq -r '.data.data.api_key')
-    [[ -n "$OPENROUTER_API_KEY" && "$OPENROUTER_API_KEY" != "null" ]] \
-        || die "OpenRouter API key not found in Vault"
+        "$VAULT_ADDR/v1/secret/data/$vault_path") \
+        || die "cannot reach Vault for provider $provider"
+
+    LLM_API_KEY=$(echo "$vault_data" | jq -r '.data.data.api_key')
+    [[ -n "$LLM_API_KEY" && "$LLM_API_KEY" != "null" ]] \
+        || die "API key not found in Vault at secret/data/$vault_path"
+
+    # Z.AI stores base_url in vault too — use it if present
+    local vault_url
+    vault_url=$(echo "$vault_data" | jq -r '.data.data.base_url // empty')
+    if [[ -n "$vault_url" ]]; then
+        LLM_BASE_URL="${vault_url}/chat/completions"
+    fi
 }
 
 llm_chat() {
     local messages_json="$1"
     local payload
-    payload=$(jq -n \
-        --arg model "$MODEL" \
-        --argjson messages "$messages_json" \
-        '{model: $model, messages: $messages, temperature: 0.2, max_tokens: 8192}')
+
+    if [[ "$PROVIDER" == "zai" ]]; then
+        # Z.AI GLM-5: enable thinking mode for deeper reasoning
+        payload=$(jq -n \
+            --arg model "$LLM_MODEL" \
+            --argjson messages "$messages_json" \
+            '{model: $model, messages: $messages, max_tokens: 131072, thinking: {type: "enabled", clear_thinking: false}}')
+    else
+        payload=$(jq -n \
+            --arg model "$LLM_MODEL" \
+            --argjson messages "$messages_json" \
+            '{model: $model, messages: $messages, temperature: 0.2, max_tokens: 8192}')
+    fi
 
     local response
-    response=$(curl -sf --max-time 180 \
-        -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+    response=$(curl -sf --max-time 300 \
+        -H "Authorization: Bearer $LLM_API_KEY" \
         -H "Content-Type: application/json" \
         -d "$payload" \
-        "https://openrouter.ai/api/v1/chat/completions") \
-        || die "OpenRouter API call failed"
+        "$LLM_BASE_URL") \
+        || die "LLM API call failed ($PROVIDER: $LLM_MODEL)"
 
-    # Strip <think>...</think> tags (Qwen3 reasoning)
+    # Extract content — strip thinking traces if present
     echo "$response" | jq -r '.choices[0].message.content // empty' \
         | sed '/<think>/,/<\/think>/d'
 }
@@ -97,6 +144,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     question TEXT NOT NULL,
     answer TEXT,
     messages TEXT,
+    provider TEXT,
+    model TEXT,
     status TEXT DEFAULT 'running',
     steps INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
@@ -173,19 +222,21 @@ ${result}
 # Main
 # ---------------------------------------------------------------------------
 cmd_deepsearch() {
-    local question=""
+    local question="" provider="$PROVIDER"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --question) question="$2"; shift 2 ;;
+            --question) question="$2";  shift 2 ;;
+            --provider) provider="$2";  shift 2 ;;
+            --model)    DEEPSEARCH_MODEL="$2"; shift 2 ;;
             -*)         die "unknown flag: $1" ;;
-            *)          question="$1"; shift ;;
+            *)          question="$1";  shift ;;
         esac
     done
 
     [[ -z "$question" ]] && die "question is required"
 
-    load_api_key
+    load_provider "$provider"
     ensure_db
 
     local conv_id
@@ -194,7 +245,7 @@ cmd_deepsearch() {
     # Insert conversation row
     local q_escaped
     q_escaped=$(echo "$question" | sed "s/'/''/g")
-    sqlite3 "$DB_PATH" "INSERT INTO conversations (id, question) VALUES ('$conv_id', '$q_escaped');"
+    sqlite3 "$DB_PATH" "INSERT INTO conversations (id, question, provider, model) VALUES ('$conv_id', '$q_escaped', '$provider', '$LLM_MODEL');"
 
     # Build initial messages
     local messages
@@ -293,6 +344,7 @@ cmd_deepsearch() {
     echo "# Deep Search Result"
     echo ""
     echo "**ID:** $conv_id"
+    echo "**Provider:** $provider ($LLM_MODEL)"
     echo "**Steps:** $step"
     echo "**Status:** $final_status"
     echo ""

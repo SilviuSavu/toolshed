@@ -1905,6 +1905,18 @@
           "required": true,
           "positional": true,
           "description": "A detailed question about the codebase to research"
+        },
+        "provider": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "LLM provider: zai (GLM-5, default) or openrouter (Qwen3-coder)"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Override model name (e.g. glm-4.7, qwen/qwen3-235b-a22b)"
         }
       }
     },
