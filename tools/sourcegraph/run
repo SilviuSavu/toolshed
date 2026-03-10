@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ###############################################################################
-# sourcegraph — unified Sourcegraph tool (all 13 modules)
+# sourcegraph — unified Sourcegraph tool (all 15 modules)
 #
 # Core commands are handled inline. Prefixed commands delegate to module
 # scripts in ./modules/, stripping the prefix before dispatch.
@@ -19,6 +19,14 @@ shift || true
 # ---------------------------------------------------------------------------
 
 case "$COMMAND" in
+    # --- Deep Search (LLM-driven multi-step research) ---
+    deepsearch)
+        exec "$MODULES/deepsearch" "$@"
+        ;;
+    deepsearch_read|deepsearch_list)
+        exec "$MODULES/deepsearch-read" "${COMMAND#deepsearch_}" "$@"
+        ;;
+
     # --- Code Intelligence (routes to narsil/lsp via toolshed) ---
     go_to_definition|find_references|nls_search)
         exec "$MODULES/code-intel" "$COMMAND" "$@"

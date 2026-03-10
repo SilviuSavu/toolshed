@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# deepsearch_read — retrieve a stored deep search conversation
+###############################################################################
+
+DB_DIR="$HOME/.toolshed/data"
+DB_PATH="$DB_DIR/deepsearch.db"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+cmd_deepsearch_read() {
+    local identifier=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --identifier) identifier="$2"; shift 2 ;;
+            -*)           die "unknown flag: $1" ;;
+            *)            identifier="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$identifier" ]] && die "identifier is required"
+
+    [[ -f "$DB_PATH" ]] || die "no deepsearch database found"
+
+    local row
+    row=$(sqlite3 -json "$DB_PATH" \
+        "SELECT id, question, answer, steps, status, created_at, completed_at FROM conversations WHERE id = '$identifier' LIMIT 1;")
+
+    local count
+    count=$(echo "$row" | jq 'length')
+
+    if [[ "$count" -eq 0 || "$count" == "null" ]]; then
+        # Try prefix match
+        row=$(sqlite3 -json "$DB_PATH" \
+            "SELECT id, question, answer, steps, status, created_at, completed_at FROM conversations WHERE id LIKE '${identifier}%' ORDER BY created_at DESC LIMIT 1;")
+        count=$(echo "$row" | jq 'length')
+        [[ "$count" -eq 0 || "$count" == "null" ]] && die "conversation not found: $identifier"
+    fi
+
+    local id question answer steps status created completed
+    id=$(echo "$row" | jq -r '.[0].id')
+    question=$(echo "$row" | jq -r '.[0].question')
+    answer=$(echo "$row" | jq -r '.[0].answer // "No answer yet"')
+    steps=$(echo "$row" | jq -r '.[0].steps // 0')
+    status=$(echo "$row" | jq -r '.[0].status // "unknown"')
+    created=$(echo "$row" | jq -r '.[0].created_at // "unknown"')
+    completed=$(echo "$row" | jq -r '.[0].completed_at // "in progress"')
+
+    echo "# Deep Search: $question"
+    echo ""
+    echo "**ID:** $id"
+    echo "**Steps:** $steps | **Status:** $status"
+    echo "**Created:** $created | **Completed:** $completed"
+    echo ""
+    echo "---"
+    echo ""
+    echo "$answer"
+}
+
+###############################################################################
+# List recent conversations (bonus subcommand)
+###############################################################################
+cmd_deepsearch_list() {
+    local count="${1:-10}"
+
+    [[ -f "$DB_PATH" ]] || die "no deepsearch database found"
+
+    local rows
+    rows=$(sqlite3 -json "$DB_PATH" \
+        "SELECT id, question, steps, status, created_at FROM conversations ORDER BY created_at DESC LIMIT $count;")
+
+    local num
+    num=$(echo "$rows" | jq 'length')
+    [[ "$num" -eq 0 ]] && { echo "No conversations found."; return 0; }
+
+    echo "# Recent Deep Searches"
+    echo ""
+    for ((i = 0; i < num; i++)); do
+        local id q steps status created
+        id=$(echo "$rows" | jq -r ".[$i].id")
+        q=$(echo "$rows" | jq -r ".[$i].question")
+        steps=$(echo "$rows" | jq -r ".[$i].steps")
+        status=$(echo "$rows" | jq -r ".[$i].status")
+        created=$(echo "$rows" | jq -r ".[$i].created_at")
+        # Truncate question for display
+        [[ ${#q} -gt 80 ]] && q="${q:0:77}..."
+        echo "- **$id** ($status, ${steps} steps, $created)"
+        echo "  $q"
+    done
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+COMMAND="${1:-read}"
+shift || true
+
+case "$COMMAND" in
+    read)  cmd_deepsearch_read "$@" ;;
+    list)  cmd_deepsearch_list "$@" ;;
+    *)     cmd_deepsearch_read "$COMMAND" "$@" ;;
+esac

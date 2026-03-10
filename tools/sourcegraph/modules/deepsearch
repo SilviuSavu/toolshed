@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# deepsearch — multi-step LLM-driven code research across Sourcegraph + local
+#
+# Spawns an LLM research loop that combines keyword search, semantic search,
+# symbol navigation, call graphs, and file reads to answer complex questions.
+###############################################################################
+
+DB_DIR="$HOME/.toolshed/data"
+DB_PATH="$DB_DIR/deepsearch.db"
+TOOLSHED_URL="${TOOLSHED_URL:-http://127.0.0.1:8081}"
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+MAX_STEPS=5
+MAX_TOOL_OUTPUT=4000
+MODEL="${DEEPSEARCH_MODEL:-qwen/qwen3-coder}"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Vault + OpenRouter
+# ---------------------------------------------------------------------------
+load_api_key() {
+    local vault_data
+    vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" \
+        "$VAULT_ADDR/v1/secret/data/openrouter") \
+        || die "cannot reach Vault"
+    OPENROUTER_API_KEY=$(echo "$vault_data" | jq -r '.data.data.api_key')
+    [[ -n "$OPENROUTER_API_KEY" && "$OPENROUTER_API_KEY" != "null" ]] \
+        || die "OpenRouter API key not found in Vault"
+}
+
+llm_chat() {
+    local messages_json="$1"
+    local payload
+    payload=$(jq -n \
+        --arg model "$MODEL" \
+        --argjson messages "$messages_json" \
+        '{model: $model, messages: $messages, temperature: 0.2, max_tokens: 8192}')
+
+    local response
+    response=$(curl -sf --max-time 180 \
+        -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        "https://openrouter.ai/api/v1/chat/completions") \
+        || die "OpenRouter API call failed"
+
+    # Strip <think>...</think> tags (Qwen3 reasoning)
+    echo "$response" | jq -r '.choices[0].message.content // empty' \
+        | sed '/<think>/,/<\/think>/d'
+}
+
+# ---------------------------------------------------------------------------
+# Toolshed
+# ---------------------------------------------------------------------------
+ts_call() {
+    local tool_name="$1"
+    local args_json="$2"
+    local response
+    response=$(curl -sf --max-time 60 \
+        -X POST "$TOOLSHED_URL" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -n \
+            --arg name "$tool_name" \
+            --argjson args "$args_json" \
+            '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:$name,arguments:$args}}'
+        )") || { echo "[tool call failed: $tool_name]"; return 0; }
+
+    local is_error
+    is_error=$(echo "$response" | jq -r '.result.isError // false')
+    if [[ "$is_error" == "true" ]]; then
+        echo "[error: $(echo "$response" | jq -r '.result.content[0].text // "unknown"')]"
+        return 0
+    fi
+
+    local text
+    text=$(echo "$response" | jq -r '.result.content[0].text // empty')
+    # Truncate to MAX_TOOL_OUTPUT chars
+    if [[ ${#text} -gt $MAX_TOOL_OUTPUT ]]; then
+        echo "${text:0:$MAX_TOOL_OUTPUT}... [truncated]"
+    else
+        echo "$text"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# SQLite
+# ---------------------------------------------------------------------------
+ensure_db() {
+    mkdir -p "$DB_DIR"
+    sqlite3 "$DB_PATH" <<'SQL'
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    answer TEXT,
+    messages TEXT,
+    status TEXT DEFAULT 'running',
+    steps INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+SQL
+}
+
+generate_id() {
+    printf '%s-%s' "$(date +%s)" "$(head -c4 /dev/urandom | xxd -p)"
+}
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT='You are a code research assistant. You investigate complex questions about codebases by searching, reading files, and tracing code paths.
+
+Available tools (call via tool_calls array):
+- sourcegraph__keyword_search: {query, count?} — search across ALL remote repos
+- narsil__hybrid_search: {query, repo?, limit?} — semantic+keyword on local repos
+- sourcegraph__symbols: {query, repo?, kind?} — find symbols across repos
+- sourcegraph__read_file: {repo, path, rev?} — read file from a repo
+- narsil__go_to_definition: {repo, file, symbol} — AST-based go-to-def
+- narsil__find_references: {repo, symbol} — AST-based find refs
+- narsil__call_graph: {repo, file, function} — outgoing calls from a function
+- narsil__callers: {repo, file, function} — incoming callers of a function
+- lsp__find_definition: {file_path, symbol_name} — compiler-accurate definition
+- lsp__find_references: {file_path, symbol_name} — compiler-accurate references
+
+Reply ONLY with valid JSON (no markdown fences, no extra text). Two formats:
+
+1. Need more research:
+{"status":"research","tool_calls":[{"tool":"tool_name","args":{...}}],"reasoning":"brief explanation"}
+
+2. Ready to answer:
+{"status":"done","answer":"your detailed markdown answer here"}
+
+Rules:
+- Max 3 tool_calls per step
+- Search broadly first, then drill into specific files
+- Always explain your reasoning
+- When done, provide a thorough answer with file paths and code references
+- If you cannot find enough information, say so honestly'
+
+# ---------------------------------------------------------------------------
+# Execute tool calls from LLM response
+# ---------------------------------------------------------------------------
+execute_tool_calls() {
+    local response_json="$1"
+    local results=""
+    local num_calls
+    num_calls=$(echo "$response_json" | jq '.tool_calls | length')
+
+    for ((i = 0; i < num_calls && i < 3; i++)); do
+        local tool args
+        tool=$(echo "$response_json" | jq -r ".tool_calls[$i].tool")
+        args=$(echo "$response_json" | jq -c ".tool_calls[$i].args")
+
+        local result
+        result=$(ts_call "$tool" "$args")
+
+        results="${results}### Tool: ${tool}
+Args: ${args}
+Result:
+${result}
+
+"
+    done
+
+    echo "$results"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+cmd_deepsearch() {
+    local question=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --question) question="$2"; shift 2 ;;
+            -*)         die "unknown flag: $1" ;;
+            *)          question="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$question" ]] && die "question is required"
+
+    load_api_key
+    ensure_db
+
+    local conv_id
+    conv_id=$(generate_id)
+
+    # Insert conversation row
+    local q_escaped
+    q_escaped=$(echo "$question" | sed "s/'/''/g")
+    sqlite3 "$DB_PATH" "INSERT INTO conversations (id, question) VALUES ('$conv_id', '$q_escaped');"
+
+    # Build initial messages
+    local messages
+    messages=$(jq -n \
+        --arg system "$SYSTEM_PROMPT" \
+        --arg question "$question" \
+        '[
+            {"role": "system", "content": $system},
+            {"role": "user", "content": ("Research this question:\n\n" + $question)}
+        ]')
+
+    local step=0
+    local answer=""
+    local final_status="completed"
+
+    while [[ $step -lt $MAX_STEPS ]]; do
+        step=$((step + 1))
+
+        # Call LLM
+        local llm_response
+        llm_response=$(llm_chat "$messages")
+
+        if [[ -z "$llm_response" ]]; then
+            final_status="error"
+            answer="LLM returned empty response at step $step"
+            break
+        fi
+
+        # Append assistant message
+        messages=$(echo "$messages" | jq --arg content "$llm_response" \
+            '. + [{"role": "assistant", "content": $content}]')
+
+        # Try to parse as JSON — handle possible markdown fences
+        local parsed
+        parsed=$(echo "$llm_response" | sed 's/^```json//;s/^```//;s/```$//' \
+            | jq -c '.' 2>/dev/null) || true
+
+        if [[ -z "$parsed" ]]; then
+            # Try extracting JSON from response
+            parsed=$(echo "$llm_response" | grep -o '{.*}' | head -1 \
+                | jq -c '.' 2>/dev/null) || true
+        fi
+
+        if [[ -z "$parsed" ]]; then
+            # LLM didn't return valid JSON — treat as final answer
+            answer="$llm_response"
+            break
+        fi
+
+        local status
+        status=$(echo "$parsed" | jq -r '.status // "unknown"')
+
+        if [[ "$status" == "done" ]]; then
+            answer=$(echo "$parsed" | jq -r '.answer // empty')
+            break
+        elif [[ "$status" == "research" ]]; then
+            # Execute tool calls
+            local tool_results
+            tool_results=$(execute_tool_calls "$parsed")
+
+            # Append tool results as user message
+            messages=$(echo "$messages" | jq --arg content "$tool_results" \
+                '. + [{"role": "user", "content": ("Tool results:\n\n" + $content + "\n\nContinue researching or provide your final answer.")}]')
+        else
+            answer="$llm_response"
+            break
+        fi
+    done
+
+    # If we exhausted steps without an answer, force synthesis
+    if [[ -z "$answer" && $step -ge $MAX_STEPS ]]; then
+        messages=$(echo "$messages" | jq \
+            '. + [{"role": "user", "content": "You have reached the maximum number of research steps. Synthesize a final answer now from all information gathered. Reply with {\"status\":\"done\",\"answer\":\"...\"}"}]')
+
+        local final_response
+        final_response=$(llm_chat "$messages")
+        local final_parsed
+        final_parsed=$(echo "$final_response" | sed 's/^```json//;s/^```//;s/```$//' \
+            | jq -c '.' 2>/dev/null) || true
+
+        if [[ -n "$final_parsed" ]]; then
+            answer=$(echo "$final_parsed" | jq -r '.answer // empty')
+        fi
+        [[ -z "$answer" ]] && answer="$final_response"
+    fi
+
+    # Store in SQLite — use temp files to avoid shell quoting with large JSON
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    echo "$answer" > "$tmpdir/answer"
+    echo "$messages" > "$tmpdir/messages"
+    sqlite3 "$DB_PATH" "UPDATE conversations SET answer = readfile('$tmpdir/answer'), messages = readfile('$tmpdir/messages'), status = '$final_status', steps = $step, completed_at = datetime('now') WHERE id = '$conv_id';"
+    rm -rf "$tmpdir"
+
+    # Output
+    echo "# Deep Search Result"
+    echo ""
+    echo "**ID:** $conv_id"
+    echo "**Steps:** $step"
+    echo "**Status:** $final_status"
+    echo ""
+    echo "---"
+    echo ""
+    echo "$answer"
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+cmd_deepsearch "$@"

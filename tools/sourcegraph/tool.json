@@ -1896,6 +1896,39 @@
           "description": "Maximum results to return (default: 10)"
         }
       }
+    },
+    "deepsearch": {
+      "description": "Multi-step LLM-driven deep code research. Spawns an AI research loop that searches, reads files, traces code paths, and synthesizes a thorough answer. Use for complex questions that require combining information from multiple sources across repositories.",
+      "args": {
+        "question": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "A detailed question about the codebase to research"
+        }
+      }
+    },
+    "deepsearch_read": {
+      "description": "Retrieve a stored deep search conversation by ID. Returns the full question, research steps, and synthesized answer.",
+      "args": {
+        "identifier": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Conversation ID returned by deepsearch (or prefix match)"
+        }
+      }
+    },
+    "deepsearch_list": {
+      "description": "List recent deep search conversations.",
+      "args": {
+        "count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Number of recent conversations to show (default: 10)"
+        }
+      }
     }
   }
 }
