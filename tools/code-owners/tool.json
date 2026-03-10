@@ -4,18 +4,16 @@
   "category": "developer-tools",
   "type": "native",
   "max_output": 50000,
-  "health": {
-    "command": "health",
-    "interval": 300,
-    "timeout": 15
-  },
+  "health": "code-owners health",
   "commands": {
     "sync": {
       "description": "Fetch and parse CODEOWNERS files from all indexed repos (or a specific repo)",
       "args": {
         "--repo": {
           "required": false,
-          "description": "Sync a specific repo only (e.g. \"github.com/org/repo\")"
+          "description": "Sync a specific repo only (e.g. \"github.com/org/repo\")",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -25,12 +23,14 @@
         "repo": {
           "positional": true,
           "required": true,
-          "description": "Repository name (e.g. \"github.com/org/repo\")"
+          "description": "Repository name (e.g. \"github.com/org/repo\")",
+          "type": "string"
         },
         "path": {
           "positional": true,
           "required": true,
-          "description": "File path to check ownership for"
+          "description": "File path to check ownership for",
+          "type": "string"
         }
       }
     },
@@ -40,11 +40,14 @@
         "owner": {
           "positional": true,
           "required": true,
-          "description": "Owner handle (e.g. @username or @org/team)"
+          "description": "Owner handle (e.g. @username or @org/team)",
+          "type": "string"
         },
         "--repo": {
           "required": false,
-          "description": "Limit search to a specific repo"
+          "description": "Limit search to a specific repo",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -57,7 +60,9 @@
       "args": {
         "--repo": {
           "required": false,
-          "description": "Limit to a specific repo"
+          "description": "Limit to a specific repo",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -67,7 +72,8 @@
         "repo": {
           "positional": true,
           "required": true,
-          "description": "Repository name to check for unowned files"
+          "description": "Repository name to check for unowned files",
+          "type": "string"
         }
       }
     },

@@ -4,38 +4,46 @@
   "category": "developer-tools",
   "type": "native",
   "max_output": 50000,
-  "health": {
-    "command": "health",
-    "interval": 300,
-    "timeout": 15
-  },
+  "health": "batch-changes health",
   "commands": {
     "create": {
       "description": "Create a new batch change spec (saved locally, not yet executed)",
       "args": {
         "--name": {
           "required": true,
-          "description": "Batch change name (used as identifier)"
+          "description": "Batch change name (used as identifier)",
+          "type": "string",
+          "positional": false
         },
         "--description": {
           "required": false,
-          "description": "Human-readable description of the batch change"
+          "description": "Human-readable description of the batch change",
+          "type": "string",
+          "positional": false
         },
         "--query": {
           "required": true,
-          "description": "Sourcegraph search query to find target repos (e.g. \"repo:myorg/ file:package.json lodash\")"
+          "description": "Sourcegraph search query to find target repos (e.g. \"repo:myorg/ file:package.json lodash\")",
+          "type": "string",
+          "positional": false
         },
         "--script": {
           "required": true,
-          "description": "Shell command to run inside each repo clone (e.g. \"sed -i 's/old/new/g' file.txt\")"
+          "description": "Shell command to run inside each repo clone (e.g. \"sed -i 's/old/new/g' file.txt\")",
+          "type": "string",
+          "positional": false
         },
         "--branch": {
           "required": false,
-          "description": "Branch name to create in each repo (default: batch/{name})"
+          "description": "Branch name to create in each repo (default: batch/{name})",
+          "type": "string",
+          "positional": false
         },
         "--commit-msg": {
           "required": false,
-          "description": "Commit message for each repo (default: \"batch-change: {name}\")"
+          "description": "Commit message for each repo (default: \"batch-change: {name}\")",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -45,11 +53,14 @@
         "name": {
           "positional": true,
           "required": true,
-          "description": "Name of the batch change to execute"
+          "description": "Name of the batch change to execute",
+          "type": "string"
         },
         "--dry-run": {
           "required": false,
-          "description": "Show what would happen without making any changes"
+          "description": "Show what would happen without making any changes",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -59,7 +70,8 @@
         "name": {
           "positional": true,
           "required": true,
-          "description": "Name of the batch change to check"
+          "description": "Name of the batch change to check",
+          "type": "string"
         }
       }
     },

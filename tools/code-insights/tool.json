@@ -4,30 +4,34 @@
   "category": "monitoring",
   "type": "native",
   "max_output": 25000,
-  "health": {
-    "command": "health",
-    "interval": 300,
-    "timeout": 15
-  },
+  "health": "code-insights health",
   "commands": {
     "create": {
       "description": "Create a new insight (tracked metric)",
       "args": {
         "--name": {
           "required": true,
-          "description": "Insight name (e.g. \"deprecated-api-usage\")"
+          "description": "Insight name (e.g. \"deprecated-api-usage\")",
+          "type": "string",
+          "positional": false
         },
         "--query": {
           "required": true,
-          "description": "Sourcegraph search query (e.g. \"lang:go fmt.Println\")"
+          "description": "Sourcegraph search query (e.g. \"lang:go fmt.Println\")",
+          "type": "string",
+          "positional": false
         },
         "--description": {
           "required": false,
-          "description": "Human-readable description of the insight"
+          "description": "Human-readable description of the insight",
+          "type": "string",
+          "positional": false
         },
         "--interval": {
           "required": false,
-          "description": "Collection interval in hours (default: 24, informational — actual scheduling is external)"
+          "description": "Collection interval in hours (default: 24, informational — actual scheduling is external)",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -36,7 +40,9 @@
       "args": {
         "--name": {
           "required": false,
-          "description": "Specific insight to collect (if omitted, collects all)"
+          "description": "Specific insight to collect (if omitted, collects all)",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -50,15 +56,20 @@
         "name": {
           "positional": true,
           "required": true,
-          "description": "Name of the insight"
+          "description": "Name of the insight",
+          "type": "string"
         },
         "--days": {
           "required": false,
-          "description": "Number of days to show (default: 30)"
+          "description": "Number of days to show (default: 30)",
+          "type": "string",
+          "positional": false
         },
         "--format": {
           "required": false,
-          "description": "Output format: text or json (default: text)"
+          "description": "Output format: text or json (default: text)",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -68,16 +79,20 @@
         "name1": {
           "positional": true,
           "required": true,
-          "description": "First insight name"
+          "description": "First insight name",
+          "type": "string"
         },
         "name2": {
           "positional": true,
           "required": true,
-          "description": "Second insight name"
+          "description": "Second insight name",
+          "type": "string"
         },
         "--days": {
           "required": false,
-          "description": "Number of days to show (default: 30)"
+          "description": "Number of days to show (default: 30)",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -95,7 +110,8 @@
         "name": {
           "positional": true,
           "required": true,
-          "description": "Name of the insight to delete"
+          "description": "Name of the insight to delete",
+          "type": "string"
         }
       }
     },

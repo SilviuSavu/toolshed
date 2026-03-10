@@ -4,29 +4,34 @@
   "category": "monitoring",
   "type": "native",
   "max_output": 10000,
-  "health": {
-    "command": "health",
-    "interval": 300
-  },
+  "health": "code-monitor health",
   "commands": {
     "create": {
       "description": "Create a new code monitor",
       "args": {
         "--name": {
           "required": true,
-          "description": "Monitor name (unique identifier)"
+          "description": "Monitor name (unique identifier)",
+          "type": "string",
+          "positional": false
         },
         "--query": {
           "required": true,
-          "description": "Sourcegraph search query (should include type:diff or type:commit)"
+          "description": "Sourcegraph search query (should include type:diff or type:commit)",
+          "type": "string",
+          "positional": false
         },
         "--webhook": {
           "required": false,
-          "description": "Webhook URL to POST alerts to (e.g., Slack incoming webhook)"
+          "description": "Webhook URL to POST alerts to (e.g., Slack incoming webhook)",
+          "type": "string",
+          "positional": false
         },
         "--interval": {
           "required": false,
-          "description": "Check interval in minutes (default: 15, informational — actual scheduling is external)"
+          "description": "Check interval in minutes (default: 15, informational — actual scheduling is external)",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -35,11 +40,15 @@
       "args": {
         "--name": {
           "required": false,
-          "description": "Specific monitor to check (if omitted, checks all)"
+          "description": "Specific monitor to check (if omitted, checks all)",
+          "type": "string",
+          "positional": false
         },
         "--since": {
           "required": false,
-          "description": "Override 'since' time in ISO8601 format (default: last check time from DB)"
+          "description": "Override 'since' time in ISO8601 format (default: last check time from DB)",
+          "type": "string",
+          "positional": false
         }
       }
     },
@@ -57,7 +66,8 @@
         "name": {
           "required": true,
           "positional": true,
-          "description": "Name of the monitor to delete"
+          "description": "Name of the monitor to delete",
+          "type": "string"
         }
       }
     },
@@ -67,11 +77,14 @@
         "name": {
           "required": true,
           "positional": true,
-          "description": "Name of the monitor"
+          "description": "Name of the monitor",
+          "type": "string"
         },
         "--limit": {
           "required": false,
-          "description": "Maximum number of results to show (default: 20)"
+          "description": "Maximum number of results to show (default: 20)",
+          "type": "string",
+          "positional": false
         }
       }
     },
