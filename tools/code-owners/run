@@ -54,10 +54,10 @@ SQL
 # Execute a Sourcegraph GraphQL query. $1 = query, $2 = variables JSON.
 sg_graphql() {
   local query="$1"
-  local variables="${2:-{}}"
+  local variables="${2-"{}"}"
   local payload
-  payload=$(jq -n --arg q "$query" --argjson v "$variables" '{query: $q, variables: $v}')
-  curl -sf -X POST "$SG_URL/.api/graphql" \
+  payload=$(printf '{"query":%s,"variables":%s}' "$(jq -n --arg q "$query" '$q')" "$variables")
+  curl -sf --max-time 15 -X POST "$SG_URL/.api/graphql" \
     -H "Authorization: token $SG_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$payload"

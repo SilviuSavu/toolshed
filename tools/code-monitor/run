@@ -385,7 +385,7 @@ cmd_health() {
   echo "Checking Sourcegraph connectivity..."
   if [[ -n "${SRC_URL:-}" && -n "${SRC_TOKEN:-}" ]]; then
     local resp
-    resp=$(curl -sf -o /dev/null -w "%{http_code}" \
+    resp=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w "%{http_code}" \
       -H "Authorization: token $SRC_TOKEN" \
       "$SRC_URL/.api/graphql" \
       -d '{"query":"{ currentUser { username } }"}' 2>/dev/null) || resp="000"

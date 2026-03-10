@@ -437,7 +437,7 @@ cmd_health() {
   echo "Checking Sourcegraph connectivity ..."
   if load_sourcegraph_creds 2>/dev/null; then
     local sg_status
-    sg_status=$(curl -sf -o /dev/null -w '%{http_code}' \
+    sg_status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
       -H "Authorization: token $SRC_TOKEN" \
       "$SRC_URL/.api/graphql" \
       -d '{"query":"{ currentUser { username } }"}' 2>/dev/null || echo "000")
@@ -455,7 +455,7 @@ cmd_health() {
   echo "Checking GitLab connectivity ..."
   if load_gitlab_token 2>/dev/null; then
     local gl_status
-    gl_status=$(curl -sf -o /dev/null -w '%{http_code}' \
+    gl_status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
       -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
       "$GITLAB_URL/api/v4/version" 2>/dev/null || echo "000")
     if [[ "$gl_status" == "200" ]]; then
@@ -471,7 +471,7 @@ cmd_health() {
 
   echo "Checking Vault connectivity ..."
   local vault_status
-  vault_status=$(curl -sf -o /dev/null -w '%{http_code}' \
+  vault_status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
     "$VAULT_ADDR/v1/sys/health" 2>/dev/null || echo "000")
   if [[ "$vault_status" == "200" ]]; then
     echo "  Vault: OK ($VAULT_ADDR)"

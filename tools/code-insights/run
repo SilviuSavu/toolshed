@@ -508,7 +508,7 @@ cmd_health() {
   # Check Sourcegraph connectivity
   if [[ "${SG_URL:-}" != "" ]]; then
     local status
-    status=$(curl -sf -o /dev/null -w '%{http_code}' \
+    status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
       -H "Authorization: token $SG_TOKEN" \
       "${SG_URL}/.api/graphql" \
       -X POST -d '{"query":"{ currentUser { username } }"}' 2>/dev/null || echo "000")
