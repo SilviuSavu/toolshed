@@ -7,8 +7,8 @@ set -euo pipefail
 
 DATA_DIR="$HOME/.toolshed/data/batch-changes"
 CLONE_BASE="/tmp/batch-changes"
-GITLAB_URL="http://192.168.1.10"
-GITLAB_SSH_HOST="192.168.1.10"
+GITLAB_URL="http://localhost"
+GITLAB_SSH_HOST="localhost"
 GITLAB_SSH_PORT="2222"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
@@ -116,7 +116,7 @@ gitlab_mr_status() {
 
 # ---------------------------------------------------------------------------
 # Extract namespace/project from Sourcegraph repo name
-# Format: "192.168.1.10/{namespace}/{project}"
+# Format: "localhost/{namespace}/{project}" or "192.168.1.10/{namespace}/{project}"
 # ---------------------------------------------------------------------------
 
 parse_repo_path() {
