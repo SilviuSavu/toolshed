@@ -1,0 +1,410 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# sg-webhooks — Sourcegraph webhook management (ADMIN)
+###############################################################################
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
+SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
+unset _vault_data
+
+graphql() {
+    curl -sf -H "Authorization: token $SG_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -X POST "$SG_URL/.api/graphql" \
+        -d "$1"
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+check_admin() {
+    local result
+    result=$(graphql '{"query":"{ currentUser { siteAdmin } }"}')
+    local is_admin
+    is_admin=$(echo "$result" | jq -r '.data.currentUser.siteAdmin // false')
+    [[ "$is_admin" != "true" ]] && die "this command requires site admin privileges"
+}
+
+###############################################################################
+# COMMANDS
+###############################################################################
+
+cmd_list() {
+    local first="25" after=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --first) first="$2"; shift 2 ;;
+            --after) after="$2"; shift 2 ;;
+            -*)      die "unknown flag: $1" ;;
+            *)       die "unexpected argument: $1" ;;
+        esac
+    done
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --argjson first "$first" \
+        --arg after "$after" \
+        '{
+            query: "query ListWebhooks($first: Int!, $after: String) { webhooks(first: $first, after: $after) { nodes { id name codeHostKind codeHostURN secret createdAt updatedAt createdBy { username } updatedBy { username } } totalCount pageInfo { hasNextPage endCursor } } }",
+            variables: {
+                first: $first,
+                after: (if $after != "" then $after else null end)
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.webhooks.totalCount // 0')
+    echo "Webhooks ($total total):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.webhooks.nodes[]? |
+        "\(.name)  [\(.codeHostKind)]",
+        "  ID: \(.id)",
+        "  Code Host: \(.codeHostURN)",
+        "  Secret: \(if .secret then "configured" else "none" end)",
+        "  Created by: \(.createdBy.username // "unknown") at \(.createdAt)",
+        ""
+    '
+}
+
+cmd_get() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "query GetWebhook($id: ID!) { node(id: $id) { ... on Webhook { id name codeHostKind codeHostURN secret createdAt updatedAt createdBy { username } updatedBy { username } } } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local name
+    name=$(echo "$result" | jq -r '.data.node.name // empty')
+    if [[ -z "$name" ]]; then
+        die "webhook not found: $id"
+    fi
+
+    echo "$result" | jq -r '
+        .data.node |
+        "Name: \(.name)",
+        "ID: \(.id)",
+        "Code Host Kind: \(.codeHostKind)",
+        "Code Host URN: \(.codeHostURN)",
+        "Secret: \(if .secret then "***configured***" else "none" end)",
+        "Created: \(.createdAt) by \(.createdBy.username // "unknown")",
+        "Updated: \(.updatedAt) by \(.updatedBy.username // "unknown")"
+    '
+}
+
+cmd_create() {
+    local name="" codeHostKind="" codeHostURN="" secret=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)         name="$2";         shift 2 ;;
+            --codeHostKind) codeHostKind="$2"; shift 2 ;;
+            --codeHostURN)  codeHostURN="$2";  shift 2 ;;
+            --secret)       secret="$2";       shift 2 ;;
+            -*)             die "unknown flag: $1" ;;
+            *)              die "unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -z "$name" ]]         && die "--name is required"
+    [[ -z "$codeHostKind" ]] && die "--codeHostKind is required"
+    [[ -z "$codeHostURN" ]]  && die "--codeHostURN is required"
+
+    check_admin
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg name "$name" \
+        --arg kind "$codeHostKind" \
+        --arg urn "$codeHostURN" \
+        --arg secret "$secret" \
+        '{
+            query: "mutation CreateWebhook($name: String!, $kind: String!, $urn: String!, $secret: String) { createWebhook(name: $name, codeHostKind: $kind, codeHostURN: $urn, secret: $secret) { id name } }",
+            variables: {
+                name: $name,
+                kind: $kind,
+                urn: $urn,
+                secret: (if $secret != "" then $secret else null end)
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local new_id
+    new_id=$(echo "$result" | jq -r '.data.createWebhook.id // empty')
+    if [[ -z "$new_id" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to create webhook: ${errors:-unknown error}"
+    fi
+
+    echo "Created webhook: $name"
+    echo "ID: $new_id"
+}
+
+cmd_update() {
+    local id="" name="" codeHostKind="" codeHostURN="" secret=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)         name="$2";         shift 2 ;;
+            --codeHostKind) codeHostKind="$2"; shift 2 ;;
+            --codeHostURN)  codeHostURN="$2";  shift 2 ;;
+            --secret)       secret="$2";       shift 2 ;;
+            -*)             die "unknown flag: $1" ;;
+            *)              id="$1";           shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    check_admin
+
+    local input="{\"id\": \"$id\"}"
+    [[ -n "$name" ]]         && input=$(echo "$input" | jq --arg v "$name" '. + {name: $v}')
+    [[ -n "$codeHostKind" ]] && input=$(echo "$input" | jq --arg v "$codeHostKind" '. + {codeHostKind: $v}')
+    [[ -n "$codeHostURN" ]]  && input=$(echo "$input" | jq --arg v "$codeHostURN" '. + {codeHostURN: $v}')
+    [[ -n "$secret" ]]       && input=$(echo "$input" | jq --arg v "$secret" '. + {secret: $v}')
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        --argjson input "$input" \
+        '{
+            query: "mutation UpdateWebhook($id: ID!, $name: String, $kind: ExternalServiceKind, $urn: String, $secret: String) { updateWebhook(id: $id, name: $name, codeHostKind: $kind, codeHostURN: $urn, secret: $secret) { id name } }",
+            variables: $input
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local updated_name
+    updated_name=$(echo "$result" | jq -r '.data.updateWebhook.name // empty')
+    if [[ -z "$updated_name" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to update webhook: ${errors:-unknown error}"
+    fi
+
+    echo "Updated webhook: $updated_name (ID: $id)"
+}
+
+cmd_delete() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    check_admin
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "mutation DeleteWebhook($id: ID!) { deleteWebhook(id: $id) }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to delete webhook: $errors"
+    fi
+
+    echo "Deleted webhook: $id"
+}
+
+cmd_list_logs() {
+    local webhookId="" first="25" after="" onlyErrors=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --first)      first="$2";      shift 2 ;;
+            --after)      after="$2";      shift 2 ;;
+            --onlyErrors) onlyErrors="$2"; shift 2 ;;
+            -*)           die "unknown flag: $1" ;;
+            *)            webhookId="$1";  shift ;;
+        esac
+    done
+
+    [[ -z "$webhookId" ]] && die "webhookId is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg whId "$webhookId" \
+        --argjson first "$first" \
+        --arg after "$after" \
+        --arg onlyErrors "$onlyErrors" \
+        '{
+            query: "query WebhookLogs($whId: ID!, $first: Int!, $after: String, $onlyErrors: Boolean) { node(id: $whId) { ... on Webhook { webhookLogs(first: $first, after: $after, onlyErrors: $onlyErrors) { nodes { id receivedAt statusCode externalService { displayName } request { headers body } response { headers body } } totalCount pageInfo { hasNextPage endCursor } } } } }",
+            variables: {
+                whId: $whId,
+                first: $first,
+                after: (if $after != "" then $after else null end),
+                onlyErrors: (if $onlyErrors == "true" then true else null end)
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.node.webhookLogs.totalCount // 0')
+    echo "Webhook delivery logs ($total total):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.node.webhookLogs.nodes[]? |
+        "\(.receivedAt)  HTTP \(.statusCode // "N/A")",
+        "  ID: \(.id)",
+        "  Service: \(.externalService.displayName // "unknown")",
+        ""
+    '
+}
+
+cmd_get_log() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "query WebhookLogDetail($id: ID!) { node(id: $id) { ... on WebhookLog { id receivedAt statusCode externalService { displayName kind } request { headers body } response { headers body } } } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local received
+    received=$(echo "$result" | jq -r '.data.node.receivedAt // empty')
+    if [[ -z "$received" ]]; then
+        die "webhook log entry not found: $id"
+    fi
+
+    echo "$result" | jq -r '
+        .data.node |
+        "Received: \(.receivedAt)",
+        "Status: \(.statusCode // "N/A")",
+        "Service: \(.externalService.displayName // "unknown") (\(.externalService.kind // ""))",
+        "",
+        "--- Request ---",
+        "Headers:",
+        (.request.headers // {} | to_entries[]? | "  \(.key): \(.value)"),
+        "Body:",
+        (.request.body // "(empty)"),
+        "",
+        "--- Response ---",
+        "Headers:",
+        (.response.headers // {} | to_entries[]? | "  \(.key): \(.value)"),
+        "Body:",
+        (.response.body // "(empty)")
+    '
+}
+
+cmd_health() {
+    local ok=true
+
+    echo "Checking Sourcegraph webhook access ..."
+
+    if [[ -z "$SG_URL" || "$SG_URL" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph URL from Vault"
+        ok=false
+    elif [[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph token from Vault"
+        ok=false
+    else
+        local result
+        result=$(graphql '{"query":"{ webhooks(first: 1) { totalCount } }"}' 2>/dev/null || echo '{}')
+        local count
+        count=$(echo "$result" | jq -r '.data.webhooks.totalCount // empty')
+        if [[ -n "$count" ]]; then
+            echo "  Webhooks: OK ($count configured)"
+        else
+            echo "  Webhooks: FAILED (API not accessible — may require site admin)"
+            ok=false
+        fi
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        echo "All services healthy."
+    else
+        echo "Some services are unhealthy." >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    list)        cmd_list "$@" ;;
+    get)         cmd_get "$@" ;;
+    create)      cmd_create "$@" ;;
+    update)      cmd_update "$@" ;;
+    delete)      cmd_delete "$@" ;;
+    list_logs)   cmd_list_logs "$@" ;;
+    get_log)     cmd_get_log "$@" ;;
+    health)      cmd_health "$@" ;;
+    *)
+        echo "Usage: sg-webhooks <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  list          List webhooks"
+        echo "  get           Get webhook details"
+        echo "  create        Create a webhook (admin)"
+        echo "  update        Update a webhook (admin)"
+        echo "  delete        Delete a webhook (admin)"
+        echo "  list_logs     List delivery logs"
+        echo "  get_log       Get delivery log details"
+        echo "  health        Check API access"
+        exit 1
+        ;;
+esac

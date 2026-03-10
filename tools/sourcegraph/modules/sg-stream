@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# sg-stream — Sourcegraph streaming search API
+###############################################################################
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
+SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
+unset _vault_data
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+###############################################################################
+# COMMANDS
+###############################################################################
+
+cmd_search() {
+    local query="" patternType="keyword" count="50" timeout="30" format="text"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --patternType) patternType="$2"; shift 2 ;;
+            --count)       count="$2";       shift 2 ;;
+            --timeout)     timeout="$2";     shift 2 ;;
+            --format)      format="$2";      shift 2 ;;
+            -*)            die "unknown flag: $1" ;;
+            *)             query="$1";       shift ;;
+        esac
+    done
+
+    [[ -z "$query" ]] && die "query is required"
+
+    # Cap count at 500 and timeout at 120
+    local safe_count safe_timeout
+    safe_count=$(( count > 500 ? 500 : count ))
+    safe_timeout=$(( timeout > 120 ? 120 : timeout ))
+
+    local encoded_query
+    encoded_query=$(jq -rn --arg q "$query count:$safe_count" '$q | @uri')
+    local encoded_pattern
+    encoded_pattern=$(jq -rn --arg p "$patternType" '$p | @uri')
+
+    local stream_url="${SG_URL}/.api/search/stream?q=${encoded_query}&t=${encoded_pattern}"
+
+    # Collect SSE events with timeout
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap 'rm -f "$tmpfile"' EXIT
+
+    curl -sf \
+        -H "Authorization: token $SG_TOKEN" \
+        -H "Accept: text/event-stream" \
+        --max-time "$safe_timeout" \
+        "$stream_url" > "$tmpfile" 2>/dev/null || true
+
+    if [[ ! -s "$tmpfile" ]]; then
+        die "no results or stream timeout after ${safe_timeout}s"
+    fi
+
+    # Parse SSE events — lines alternate between "event: <type>" and "data: <json>"
+    local matches_json="[]"
+    local progress_json="{}"
+    local current_event=""
+
+    while IFS= read -r line; do
+        # Track current event type from "event: xxx" lines
+        if [[ "$line" == event:* ]]; then
+            current_event="${line#event: }"
+            current_event="${current_event%%$'\r'}"
+            continue
+        fi
+
+        if [[ "$line" == data:* ]]; then
+            local data="${line#data:}"
+
+            case "$current_event" in
+                matches)
+                    # Stream API returns a direct JSON array of match objects
+                    local new_matches
+                    new_matches=$(echo "$data" | jq '[.[]? | {
+                        type: .type,
+                        repo: (.repository // ""),
+                        path: (.path // ""),
+                        matches: [.lineMatches[]? // .chunkMatches[]? | {
+                            line: (.lineNumber // .content.start.line // 0),
+                            preview: (.preview // .content.content // "")
+                        }]
+                    }]' 2>/dev/null || echo "[]")
+                    matches_json=$(echo "$matches_json" "$new_matches" | jq -s '.[0] + .[1]')
+                    ;;
+                progress)
+                    progress_json=$(echo "$data" | jq '{
+                        matchCount: .matchCount,
+                        repositoriesCount: .repositoriesCount,
+                        durationMs: .durationMs
+                    }' 2>/dev/null || echo "$progress_json")
+                    ;;
+            esac
+        fi
+    done < "$tmpfile"
+
+    local match_count
+    match_count=$(echo "$matches_json" | jq 'length')
+
+    if [[ "$format" == "json" ]]; then
+        jq -n \
+            --argjson matches "$matches_json" \
+            --argjson progress "$progress_json" \
+            '{matches: $matches, stats: $progress}'
+    else
+        echo "Stream search results ($match_count matches collected):"
+        echo "---"
+        echo "$matches_json" | jq -r '
+            .[]? |
+            "\(.repo) \(.path)",
+            (.matches[]? | "  L\(.line): \(.preview)"),
+            ""
+        '
+        echo "---"
+        echo "$progress_json" | jq -r '"Stats: \(.matchCount // "?") matches across \(.repositoriesCount // "?") repos in \(.durationMs // "?")ms"'
+    fi
+}
+
+cmd_search_stats() {
+    local query="" timeout="15"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --timeout) timeout="$2"; shift 2 ;;
+            -*)        die "unknown flag: $1" ;;
+            *)         query="$1";   shift ;;
+        esac
+    done
+
+    [[ -z "$query" ]] && die "query is required"
+
+    local safe_timeout
+    safe_timeout=$(( timeout > 60 ? 60 : timeout ))
+
+    local encoded_query
+    encoded_query=$(jq -rn --arg q "$query count:1" '$q | @uri')
+
+    local stream_url="${SG_URL}/.api/search/stream?q=${encoded_query}"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap 'rm -f "$tmpfile"' EXIT
+
+    curl -sf \
+        -H "Authorization: token $SG_TOKEN" \
+        -H "Accept: text/event-stream" \
+        --max-time "$safe_timeout" \
+        "$stream_url" > "$tmpfile" 2>/dev/null || true
+
+    # Extract the last progress event
+    local stats="{}"
+    local current_event=""
+    while IFS= read -r line; do
+        if [[ "$line" == event:* ]]; then
+            current_event="${line#event: }"
+            current_event="${current_event%%$'\r'}"
+            continue
+        fi
+        if [[ "$line" == data:* && "$current_event" == "progress" ]]; then
+            local data="${line#data:}"
+            local has_count
+            has_count=$(echo "$data" | jq -r '.matchCount // empty' 2>/dev/null)
+            if [[ -n "$has_count" ]]; then
+                stats=$(echo "$data" | jq '{
+                    matchCount: .matchCount,
+                    repositoriesCount: .repositoriesCount,
+                    durationMs: .durationMs,
+                    skipped: [.skipped[]? | {reason: .reason, title: .title, message: .message}]
+                }' 2>/dev/null || echo "$stats")
+            fi
+        fi
+    done < "$tmpfile"
+
+    echo "Search stats for: $query"
+    echo "---"
+    echo "$stats" | jq -r '
+        "Match count: \(.matchCount // "unknown")",
+        "Repositories: \(.repositoriesCount // "unknown")",
+        "Duration: \(.durationMs // "unknown")ms",
+        (if (.skipped | length) > 0 then
+            "Skipped:",
+            (.skipped[]? | "  \(.reason): \(.title // "") — \(.message // "")")
+        else empty end)
+    '
+}
+
+cmd_health() {
+    local ok=true
+
+    echo "Checking Sourcegraph Stream API access ..."
+
+    if [[ -z "$SG_URL" || "$SG_URL" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph URL from Vault"
+        ok=false
+    elif [[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph token from Vault"
+        ok=false
+    else
+        local http_code
+        http_code=$(curl -sf -o /dev/null -w '%{http_code}' \
+            -H "Authorization: token $SG_TOKEN" \
+            -H "Accept: text/event-stream" \
+            --max-time 5 \
+            "$SG_URL/.api/search/stream?q=type:repo+count:1" 2>/dev/null || echo "000")
+
+        if [[ "$http_code" == "200" ]]; then
+            echo "  Stream API: OK ($SG_URL/.api/search/stream)"
+        else
+            echo "  Stream API: FAILED (HTTP $http_code)"
+            ok=false
+        fi
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        echo "All services healthy."
+    else
+        echo "Some services are unhealthy." >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    search)       cmd_search "$@" ;;
+    search_stats) cmd_search_stats "$@" ;;
+    health)       cmd_health "$@" ;;
+    *)
+        echo "Usage: sg-stream <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  search         Execute streaming search"
+        echo "  search_stats   Get search statistics only"
+        echo "  health         Check Stream API connectivity"
+        exit 1
+        ;;
+esac

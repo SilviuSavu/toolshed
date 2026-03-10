@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# sg-external-svc — Sourcegraph external service connections (ADMIN)
+###############################################################################
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
+SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
+unset _vault_data
+
+graphql() {
+    curl -sf -H "Authorization: token $SG_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -X POST "$SG_URL/.api/graphql" \
+        -d "$1"
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+check_admin() {
+    local result
+    result=$(graphql '{"query":"{ currentUser { siteAdmin } }"}')
+    local is_admin
+    is_admin=$(echo "$result" | jq -r '.data.currentUser.siteAdmin // false')
+    [[ "$is_admin" != "true" ]] && die "this command requires site admin privileges"
+}
+
+# Redact tokens/passwords from config JSON
+redact_secrets() {
+    jq '
+        walk(if type == "string" and (. | test("^(ghp_|glpat-|token |Bearer )"; "i")) then "***REDACTED***"
+             elif type == "object" and has("token") then .token = "***REDACTED***"
+             elif type == "object" and has("password") then .password = "***REDACTED***"
+             else . end)
+    ' 2>/dev/null || cat
+}
+
+###############################################################################
+# COMMANDS
+###############################################################################
+
+cmd_list() {
+    local kind="" first="25" after=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --kind)  kind="$2";  shift 2 ;;
+            --first) first="$2"; shift 2 ;;
+            --after) after="$2"; shift 2 ;;
+            -*)      die "unknown flag: $1" ;;
+            *)       die "unexpected argument: $1" ;;
+        esac
+    done
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --argjson first "$first" \
+        --arg after "$after" \
+        --arg kind "$kind" \
+        '{
+            query: "query ListExternalServices($first: Int!, $after: String, $kind: ExternalServiceKind) { externalServices(first: $first, after: $after, kind: $kind) { nodes { id kind displayName config warning lastSyncError lastSyncAt repoCount } totalCount pageInfo { hasNextPage endCursor } } }",
+            variables: {
+                first: $first,
+                after: (if $after != "" then $after else null end),
+                kind: (if $kind != "" then $kind else null end)
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.externalServices.totalCount // 0')
+    echo "External services ($total total):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.externalServices.nodes[]? |
+        "\(.displayName)  [\(.kind)]",
+        "  ID: \(.id)",
+        "  Repos: \(.repoCount // 0)",
+        "  Last sync: \(.lastSyncAt // "never")",
+        (if .lastSyncError then "  SYNC ERROR: \(.lastSyncError)" else empty end),
+        (if .warning then "  WARNING: \(.warning)" else empty end),
+        ""
+    '
+}
+
+cmd_get() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "query GetExternalService($id: ID!) { node(id: $id) { ... on ExternalService { id kind displayName config warning lastSyncError lastSyncAt repoCount createdAt updatedAt } } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local display
+    display=$(echo "$result" | jq -r '.data.node.displayName // empty')
+    if [[ -z "$display" ]]; then
+        die "external service not found: $id"
+    fi
+
+    echo "$result" | jq -r '
+        .data.node |
+        "Display Name: \(.displayName)",
+        "ID: \(.id)",
+        "Kind: \(.kind)",
+        "Repos: \(.repoCount // 0)",
+        "Created: \(.createdAt)",
+        "Updated: \(.updatedAt)",
+        "Last Sync: \(.lastSyncAt // "never")",
+        (if .lastSyncError then "Sync Error: \(.lastSyncError)" else empty end),
+        (if .warning then "Warning: \(.warning)" else empty end),
+        "",
+        "--- Configuration (secrets redacted) ---"
+    '
+
+    echo "$result" | jq -r '.data.node.config // "{}"' | jq . | redact_secrets
+}
+
+cmd_create() {
+    local kind="" displayName="" config=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --kind)        kind="$2";        shift 2 ;;
+            --displayName) displayName="$2"; shift 2 ;;
+            --config)      config="$2";      shift 2 ;;
+            -*)            die "unknown flag: $1" ;;
+            *)             die "unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -z "$kind" ]]        && die "--kind is required"
+    [[ -z "$displayName" ]] && die "--displayName is required"
+    [[ -z "$config" ]]      && die "--config is required"
+
+    check_admin
+
+    echo "$config" | jq empty 2>/dev/null || die "--config must be valid JSON"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg kind "$kind" \
+        --arg displayName "$displayName" \
+        --arg config "$config" \
+        '{
+            query: "mutation AddExternalService($input: AddExternalServiceInput!) { addExternalService(input: $input) { id kind displayName } }",
+            variables: {
+                input: {
+                    kind: $kind,
+                    displayName: $displayName,
+                    config: $config
+                }
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local new_id
+    new_id=$(echo "$result" | jq -r '.data.addExternalService.id // empty')
+    if [[ -z "$new_id" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to create external service: ${errors:-unknown error}"
+    fi
+
+    echo "Created external service: $displayName ($kind)"
+    echo "ID: $new_id"
+}
+
+cmd_update() {
+    local id="" displayName="" config=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --displayName) displayName="$2"; shift 2 ;;
+            --config)      config="$2";      shift 2 ;;
+            -*)            die "unknown flag: $1" ;;
+            *)             id="$1";          shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    check_admin
+
+    local input="{\"id\": \"$id\"}"
+    [[ -n "$displayName" ]] && input=$(echo "$input" | jq --arg v "$displayName" '. + {displayName: $v}')
+    if [[ -n "$config" ]]; then
+        echo "$config" | jq empty 2>/dev/null || die "--config must be valid JSON"
+        input=$(echo "$input" | jq --arg v "$config" '. + {config: $v}')
+    fi
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --argjson input "$input" \
+        '{
+            query: "mutation UpdateExternalService($input: UpdateExternalServiceInput!) { updateExternalService(input: $input) { id displayName } }",
+            variables: { input: $input }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local updated_name
+    updated_name=$(echo "$result" | jq -r '.data.updateExternalService.displayName // empty')
+    if [[ -z "$updated_name" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to update external service: ${errors:-unknown error}"
+    fi
+
+    echo "Updated external service: $updated_name (ID: $id)"
+}
+
+cmd_delete() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    check_admin
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "mutation DeleteExternalService($id: ID!) { deleteExternalService(externalService: $id) }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to delete external service: $errors"
+    fi
+
+    echo "Deleted external service: $id"
+}
+
+cmd_sync() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    check_admin
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "mutation SyncExternalService($id: ID!) { syncExternalService(id: $id) }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to trigger sync: $errors"
+    fi
+
+    echo "Triggered sync for external service: $id"
+}
+
+cmd_check_connection() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "query CheckConnection($id: ID!) { node(id: $id) { ... on ExternalService { id displayName kind lastSyncError lastSyncAt checkConnection { __typename ... on ExternalServiceAvailable { lastCheckedAt } ... on ExternalServiceUnavailable { suspectedReason } ... on ExternalServiceAvailabilityUnknown { implementationNote } } } } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local display
+    display=$(echo "$result" | jq -r '.data.node.displayName // empty')
+    if [[ -z "$display" ]]; then
+        die "external service not found: $id"
+    fi
+
+    echo "Connection check for: $display"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.node |
+        "Kind: \(.kind)",
+        "Last Sync: \(.lastSyncAt // "never")",
+        (if .lastSyncError then "Sync Error: \(.lastSyncError)" else "Sync Error: none" end),
+        (if .checkConnection.__typename == "ExternalServiceAvailable" then
+            "Status: AVAILABLE",
+            "Last Checked: \(.checkConnection.lastCheckedAt // "never")"
+        elif .checkConnection.__typename == "ExternalServiceUnavailable" then
+            "Status: UNAVAILABLE",
+            "Reason: \(.checkConnection.suspectedReason // "unknown")"
+        elif .checkConnection.__typename == "ExternalServiceAvailabilityUnknown" then
+            "Status: UNKNOWN",
+            "Note: \(.checkConnection.implementationNote // "N/A")"
+        else
+            "Status: check not available"
+        end)
+    '
+}
+
+cmd_health() {
+    local ok=true
+
+    echo "Checking Sourcegraph external service access ..."
+
+    if [[ -z "$SG_URL" || "$SG_URL" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph URL from Vault"
+        ok=false
+    elif [[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph token from Vault"
+        ok=false
+    else
+        local result
+        result=$(graphql '{"query":"{ externalServices(first: 1) { totalCount } }"}' 2>/dev/null || echo '{}')
+        local count
+        count=$(echo "$result" | jq -r '.data.externalServices.totalCount // empty')
+        if [[ -n "$count" ]]; then
+            echo "  External Services: OK ($count configured)"
+        else
+            echo "  External Services: FAILED (API not accessible — may require site admin)"
+            ok=false
+        fi
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        echo "All services healthy."
+    else
+        echo "Some services are unhealthy." >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    list)              cmd_list "$@" ;;
+    get)               cmd_get "$@" ;;
+    create)            cmd_create "$@" ;;
+    update)            cmd_update "$@" ;;
+    delete)            cmd_delete "$@" ;;
+    sync)              cmd_sync "$@" ;;
+    check_connection)  cmd_check_connection "$@" ;;
+    health)            cmd_health "$@" ;;
+    *)
+        echo "Usage: sg-external-svc <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  list               List external services"
+        echo "  get                Get service details (secrets redacted)"
+        echo "  create             Add a new service (admin)"
+        echo "  update             Update a service (admin)"
+        echo "  delete             Remove a service (admin)"
+        echo "  sync               Trigger repo sync (admin)"
+        echo "  check_connection   Test service connectivity"
+        echo "  health             Check API access"
+        exit 1
+        ;;
+esac

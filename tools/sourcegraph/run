@@ -2,574 +2,103 @@
 set -euo pipefail
 
 ###############################################################################
-# sourcegraph — code search, file browsing, and commit exploration
+# sourcegraph — unified Sourcegraph tool (all 13 modules)
+#
+# Core commands are handled inline. Prefixed commands delegate to module
+# scripts in ./modules/, stripping the prefix before dispatch.
 ###############################################################################
 
-# ---------------------------------------------------------------------------
-# Credentials (Vault)
-# ---------------------------------------------------------------------------
-
-VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
-VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
-
-_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
-SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
-SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
-unset _vault_data
-
-graphql() {
-    curl -sf -H "Authorization: token $SG_TOKEN" \
-        -H 'Content-Type: application/json' \
-        -X POST "$SG_URL/.api/graphql" \
-        -d "$1"
-}
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-die() { echo "ERROR: $*" >&2; exit 1; }
-
-# Build a Sourcegraph search query with optional filters appended
-build_search_query() {
-    local base="$1"
-    shift
-    local query="$base"
-    while [[ $# -gt 0 ]]; do
-        local key="$1" val="$2"
-        shift 2
-        if [[ -n "$val" ]]; then
-            query="$query $key:$val"
-        fi
-    done
-    echo "$query"
-}
-
-# Execute a Sourcegraph search and return the raw JSON
-sg_search() {
-    local query="$1"
-    local count="${2:-30}"
-    local gql_payload
-    gql_payload=$(jq -n \
-        --arg q "$query count:$count" \
-        '{
-            query: "query Search($q: String!) { search(query: $q) { results { resultCount results { __typename ... on FileMatch { repository { name } file { path url } lineMatches { preview lineNumber offsetAndLengths } } ... on CommitSearchResult { commit { oid abbreviatedOID message { subject } author { person { displayName email } date } url repository { name } } diffPreview { value } } } } } }",
-            variables: { q: $q }
-        }')
-    graphql "$gql_payload"
-}
-
-###############################################################################
-# COMMANDS
-###############################################################################
-
-# ---------------------------------------------------------------------------
-# keyword_search
-# ---------------------------------------------------------------------------
-cmd_keyword_search() {
-    local query="" count="30" format="text"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --count)  count="$2";  shift 2 ;;
-            --format) format="$2"; shift 2 ;;
-            -*)       die "unknown flag: $1" ;;
-            *)        query="$1";  shift ;;
-        esac
-    done
-
-    [[ -z "$query" ]] && die "query is required"
-
-    local result
-    result=$(sg_search "$query" "$count")
-
-    case "$format" in
-        raw)  echo "$result" ;;
-        json) echo "$result" | jq '.data.search.results' ;;
-        *)
-            local result_count
-            result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
-            echo "Found $result_count result(s) for: $query"
-            echo "---"
-            echo "$result" | jq -r '
-                .data.search.results.results[] |
-                if .file then
-                    "\(.repository.name) \(.file.path)",
-                    (.lineMatches[]? | "  L\(.lineNumber): \(.preview)")
-                else empty end
-            ' 2>/dev/null || true
-            ;;
-    esac
-}
-
-# ---------------------------------------------------------------------------
-# read_file
-# ---------------------------------------------------------------------------
-cmd_read_file() {
-    local repo="" path="" rev="HEAD" format="text"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --path)   path="$2";   shift 2 ;;
-            --rev)    rev="$2";    shift 2 ;;
-            --format) format="$2"; shift 2 ;;
-            -*)       die "unknown flag: $1" ;;
-            *)        repo="$1";   shift ;;
-        esac
-    done
-
-    [[ -z "$repo" ]] && die "repo is required"
-    [[ -z "$path" ]] && die "--path is required"
-
-    local gql_payload
-    gql_payload=$(jq -n \
-        --arg repo "$repo" \
-        --arg rev "$rev" \
-        --arg path "$path" \
-        '{
-            query: "query ReadFile($repo: String!, $rev: String!, $path: String!) { repository(name: $repo) { commit(rev: $rev) { file(path: $path) { content } } } }",
-            variables: { repo: $repo, rev: $rev, path: $path }
-        }')
-
-    local result
-    result=$(graphql "$gql_payload")
-
-    if [[ "$format" == "raw" ]]; then
-        echo "$result"
-        return
-    fi
-
-    local content
-    content=$(echo "$result" | jq -r '.data.repository.commit.file.content // empty')
-
-    if [[ -z "$content" ]]; then
-        local errors
-        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
-        if [[ -n "$errors" ]]; then
-            die "GraphQL error: $errors"
-        fi
-        die "file not found: $path in $repo@$rev"
-    fi
-
-    echo "$content"
-}
-
-# ---------------------------------------------------------------------------
-# list_repos
-# ---------------------------------------------------------------------------
-cmd_list_repos() {
-    local query="" count="25" format="text"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --query)  query="$2";  shift 2 ;;
-            --count)  count="$2";  shift 2 ;;
-            --format) format="$2"; shift 2 ;;
-            -*)       die "unknown flag: $1" ;;
-            *)        die "unexpected argument: $1" ;;
-        esac
-    done
-
-    local gql_payload
-    gql_payload=$(jq -n \
-        --arg query "$query" \
-        --argjson count "$count" \
-        '{
-            query: "query ListRepos($query: String, $count: Int!) { repositories(query: $query, first: $count) { nodes { name description url } totalCount pageInfo { hasNextPage endCursor } } }",
-            variables: { query: $query, count: $count }
-        }')
-
-    local result
-    result=$(graphql "$gql_payload")
-
-    if [[ "$format" == "raw" ]]; then
-        echo "$result"
-        return
-    fi
-
-    local total
-    total=$(echo "$result" | jq -r '.data.repositories.totalCount // 0')
-    echo "Repositories (showing up to $count of $total):"
-    echo "---"
-    echo "$result" | jq -r '.data.repositories.nodes[] | "\(.name)\(if .description != "" and .description != null then "  — \(.description)" else "" end)"'
-}
-
-# ---------------------------------------------------------------------------
-# list_files
-# ---------------------------------------------------------------------------
-cmd_list_files() {
-    local repo="" path="." rev="HEAD" format="text"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --path)   path="$2";   shift 2 ;;
-            --rev)    rev="$2";    shift 2 ;;
-            --format) format="$2"; shift 2 ;;
-            -*)       die "unknown flag: $1" ;;
-            *)        repo="$1";   shift ;;
-        esac
-    done
-
-    [[ -z "$repo" ]] && die "repo is required"
-
-    local gql_payload
-    gql_payload=$(jq -n \
-        --arg repo "$repo" \
-        --arg rev "$rev" \
-        --arg path "$path" \
-        '{
-            query: "query ListFiles($repo: String!, $path: String!, $rev: String!) { repository(name: $repo) { commit(rev: $rev) { tree(path: $path, recursive: false) { entries { name path isDirectory } } } } }",
-            variables: { repo: $repo, path: $path, rev: $rev }
-        }')
-
-    local result
-    result=$(graphql "$gql_payload")
-
-    if [[ "$format" == "raw" ]]; then
-        echo "$result"
-        return
-    fi
-
-    local entries
-    entries=$(echo "$result" | jq -r '.data.repository.commit.tree.entries // empty')
-
-    if [[ -z "$entries" || "$entries" == "null" ]]; then
-        local errors
-        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
-        if [[ -n "$errors" ]]; then
-            die "GraphQL error: $errors"
-        fi
-        die "path not found: $path in $repo@$rev"
-    fi
-
-    echo "Files in $repo@$rev:$path"
-    echo "---"
-    echo "$result" | jq -r '.data.repository.commit.tree.entries[] | if .isDirectory then "\(.name)/" else .name end'
-}
-
-# ---------------------------------------------------------------------------
-# symbols
-# ---------------------------------------------------------------------------
-cmd_symbols() {
-    local query="" repo="" kind="" count="25"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --repo)   repo="$2";   shift 2 ;;
-            --kind)   kind="$2";   shift 2 ;;
-            --count)  count="$2";  shift 2 ;;
-            -*)       die "unknown flag: $1" ;;
-            *)        query="$1";  shift ;;
-        esac
-    done
-
-    [[ -z "$query" ]] && die "query is required"
-
-    local search_q="type:symbol $query"
-    [[ -n "$repo" ]] && search_q="$search_q repo:$repo"
-    [[ -n "$kind" ]] && search_q="$search_q symbolKind:$kind"
-
-    local gql_payload
-    gql_payload=$(jq -n \
-        --arg q "$search_q count:$count" \
-        '{
-            query: "query Symbols($q: String!) { search(query: $q) { results { resultCount results { ... on FileMatch { repository { name } file { path } symbols { name kind location { range { start { line } } } } } } } } }",
-            variables: { q: $q }
-        }')
-
-    local result
-    result=$(graphql "$gql_payload")
-
-    local result_count
-    result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
-    echo "Found $result_count symbol(s):"
-    echo "---"
-    echo "$result" | jq -r '
-        .data.search.results.results[]? |
-        .repository.name as $repo | .file.path as $file |
-        .symbols[]? | "\($repo) \($file):\(.location.range.start.line) \(.kind) \(.name)"
-    '
-}
-
-# ---------------------------------------------------------------------------
-# commit_search
-# ---------------------------------------------------------------------------
-cmd_commit_search() {
-    local query="" repo="" author="" after="" before="" count="20" format="text"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --repo)    repo="$2";    shift 2 ;;
-            --author)  author="$2";  shift 2 ;;
-            --after)   after="$2";   shift 2 ;;
-            --before)  before="$2";  shift 2 ;;
-            --count)   count="$2";   shift 2 ;;
-            --format)  format="$2";  shift 2 ;;
-            -*)        die "unknown flag: $1" ;;
-            *)         query="$1";   shift ;;
-        esac
-    done
-
-    [[ -z "$query" ]] && die "query is required"
-
-    local search_q="type:commit $query"
-    [[ -n "$repo" ]]    && search_q="$search_q repo:$repo"
-    [[ -n "$author" ]]  && search_q="$search_q author:$author"
-    [[ -n "$after" ]]   && search_q="$search_q after:$after"
-    [[ -n "$before" ]]  && search_q="$search_q before:$before"
-
-    local result
-    result=$(sg_search "$search_q" "$count")
-
-    case "$format" in
-        raw)  echo "$result" ;;
-        json) echo "$result" | jq '.data.search.results' ;;
-        *)
-            local result_count
-            result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
-            echo "Found $result_count commit(s):"
-            echo "---"
-            echo "$result" | jq -r '
-                .data.search.results.results[]? |
-                select(.commit) |
-                "\(.commit.abbreviatedOID) \(.commit.repository.name)",
-                "  Author: \(.commit.author.person.displayName) <\(.commit.author.person.email)>",
-                "  Date:   \(.commit.author.date)",
-                "  \(.commit.message.subject)",
-                ""
-            '
-            ;;
-    esac
-}
-
-# ---------------------------------------------------------------------------
-# diff_search
-# ---------------------------------------------------------------------------
-cmd_diff_search() {
-    local query="" repo="" after="" before="" count="20" format="text"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --repo)    repo="$2";    shift 2 ;;
-            --after)   after="$2";   shift 2 ;;
-            --before)  before="$2";  shift 2 ;;
-            --count)   count="$2";   shift 2 ;;
-            --format)  format="$2";  shift 2 ;;
-            -*)        die "unknown flag: $1" ;;
-            *)         query="$1";   shift ;;
-        esac
-    done
-
-    [[ -z "$query" ]] && die "query is required"
-
-    local search_q="type:diff $query"
-    [[ -n "$repo" ]]   && search_q="$search_q repo:$repo"
-    [[ -n "$after" ]]  && search_q="$search_q after:$after"
-    [[ -n "$before" ]] && search_q="$search_q before:$before"
-
-    local result
-    result=$(sg_search "$search_q" "$count")
-
-    case "$format" in
-        raw)  echo "$result" ;;
-        json) echo "$result" | jq '.data.search.results' ;;
-        *)
-            local result_count
-            result_count=$(echo "$result" | jq -r '.data.search.results.resultCount // 0')
-            echo "Found $result_count diff result(s):"
-            echo "---"
-            echo "$result" | jq -r '
-                .data.search.results.results[]? |
-                select(.commit) |
-                "\(.commit.abbreviatedOID) \(.commit.repository.name) — \(.commit.message.subject)",
-                (if .diffPreview.value then "  \(.diffPreview.value | split("\n") | map(select(length > 0)) | first)" else "" end),
-                ""
-            '
-            ;;
-    esac
-}
-
-# ---------------------------------------------------------------------------
-# compare_revisions
-# ---------------------------------------------------------------------------
-cmd_compare_revisions() {
-    local repo="" base="" head="" format="text"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --base)   base="$2";   shift 2 ;;
-            --head)   head="$2";   shift 2 ;;
-            --format) format="$2"; shift 2 ;;
-            -*)       die "unknown flag: $1" ;;
-            *)        repo="$1";   shift ;;
-        esac
-    done
-
-    [[ -z "$repo" ]] && die "repo is required"
-    [[ -z "$base" ]] && die "--base is required"
-    [[ -z "$head" ]] && die "--head is required"
-
-    local gql_payload
-    gql_payload=$(jq -n \
-        --arg repo "$repo" \
-        --arg base "$base" \
-        --arg head "$head" \
-        '{
-            query: "query Compare($repo: String!, $base: String!, $head: String!) { repository(name: $repo) { comparison(base: $base, head: $head) { fileDiffs { nodes { oldPath newPath stat { added deleted } hunks { body } } } } } }",
-            variables: { repo: $repo, base: $base, head: $head }
-        }')
-
-    local result
-    result=$(graphql "$gql_payload")
-
-    local diffs
-    diffs=$(echo "$result" | jq '.data.repository.comparison.fileDiffs.nodes // empty')
-
-    if [[ -z "$diffs" || "$diffs" == "null" ]]; then
-        local errors
-        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
-        if [[ -n "$errors" ]]; then
-            die "GraphQL error: $errors"
-        fi
-        die "comparison failed for $repo $base..$head"
-    fi
-
-    if [[ "$format" == "json" ]]; then
-        echo "$result" | jq '.data.repository.comparison.fileDiffs'
-    else
-        local diff_count
-        diff_count=$(echo "$diffs" | jq 'length')
-        echo "Comparing $base..$head in $repo ($diff_count file(s) changed):"
-        echo "---"
-        echo "$diffs" | jq -r '.[] |
-            "\(if .oldPath == .newPath then .newPath else "\(.oldPath) -> \(.newPath)" end)  +\(.stat.added) -\(.stat.deleted)",
-            (.hunks[]?.body // empty),
-            ""
-        '
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# get_contributor_repos
-# ---------------------------------------------------------------------------
-cmd_get_contributor_repos() {
-    local author="" count="50"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --count) count="$2"; shift 2 ;;
-            -*)      die "unknown flag: $1" ;;
-            *)       author="$1"; shift ;;
-        esac
-    done
-
-    [[ -z "$author" ]] && die "author is required"
-
-    local search_q="type:commit author:$author"
-
-    local result
-    result=$(sg_search "$search_q" "$count")
-
-    local repos
-    repos=$(echo "$result" | jq -r '[.data.search.results.results[]? | select(.commit) | .commit.repository.name] | unique | .[]' 2>/dev/null)
-
-    if [[ -z "$repos" ]]; then
-        echo "No repositories found for author: $author"
-        return 0
-    fi
-
-    local repo_count
-    repo_count=$(echo "$repos" | wc -l | tr -d ' ')
-    echo "Found $repo_count repository(ies) with commits by $author:"
-    echo "---"
-    echo "$repos"
-}
-
-# ---------------------------------------------------------------------------
-# health
-# ---------------------------------------------------------------------------
-cmd_health() {
-    local ok=true
-
-    echo "Checking Sourcegraph connectivity ..."
-
-    if [[ -z "$SG_URL" || "$SG_URL" == "null" ]]; then
-        echo "  FAILED: could not load Sourcegraph URL from Vault"
-        ok=false
-    elif [[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]]; then
-        echo "  FAILED: could not load Sourcegraph token from Vault"
-        ok=false
-    else
-        local http_code
-        http_code=$(curl -sf -o /dev/null -w '%{http_code}' \
-            -H "Authorization: token $SG_TOKEN" \
-            -H 'Content-Type: application/json' \
-            -X POST "$SG_URL/.api/graphql" \
-            -d '{"query":"{ currentUser { username } }"}' 2>/dev/null || echo "000")
-
-        if [[ "$http_code" == "200" ]]; then
-            local username
-            username=$(graphql '{"query":"{ currentUser { username } }"}' | jq -r '.data.currentUser.username // "unknown"')
-            echo "  Sourcegraph: OK ($SG_URL, user: $username)"
-        else
-            echo "  Sourcegraph: FAILED (HTTP $http_code at $SG_URL)"
-            ok=false
-        fi
-    fi
-
-    echo "Checking Vault connectivity ..."
-    local vault_code
-    vault_code=$(curl -sf -o /dev/null -w '%{http_code}' \
-        "$VAULT_ADDR/v1/sys/health" 2>/dev/null || echo "000")
-    if [[ "$vault_code" == "200" ]]; then
-        echo "  Vault: OK ($VAULT_ADDR)"
-    else
-        echo "  Vault: FAILED (HTTP $vault_code at $VAULT_ADDR)"
-        ok=false
-    fi
-
-    if [[ "$ok" == "true" ]]; then
-        echo ""
-        echo "All services healthy."
-    else
-        echo ""
-        echo "Some services are unhealthy." >&2
-        return 1
-    fi
-}
-
-###############################################################################
-# Dispatch
-###############################################################################
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODULES="$SCRIPT_DIR/modules"
 
 COMMAND="${1:-}"
 shift || true
 
+# ---------------------------------------------------------------------------
+# Route: prefix → module script, stripping prefix from command name
+# ---------------------------------------------------------------------------
+
 case "$COMMAND" in
-    keyword_search)      cmd_keyword_search "$@" ;;
-    read_file)           cmd_read_file "$@" ;;
-    list_repos)          cmd_list_repos "$@" ;;
-    list_files)          cmd_list_files "$@" ;;
-    symbols)             cmd_symbols "$@" ;;
-    commit_search)       cmd_commit_search "$@" ;;
-    diff_search)         cmd_diff_search "$@" ;;
-    compare_revisions)   cmd_compare_revisions "$@" ;;
-    get_contributor_repos) cmd_get_contributor_repos "$@" ;;
-    health)              cmd_health "$@" ;;
+    # --- Code Intelligence (routes to narsil/lsp via toolshed) ---
+    go_to_definition|find_references|nls_search)
+        exec "$MODULES/code-intel" "$COMMAND" "$@"
+        ;;
+
+    # --- Core (inline) ---
+    keyword_search|read_file|list_repos|list_files|symbols|\
+    commit_search|diff_search|compare_revisions|get_contributor_repos|health)
+        exec "$MODULES/core" "$COMMAND" "$@"
+        ;;
+
+    # --- Stream ---
+    stream_*)
+        exec "$MODULES/sg-stream" "${COMMAND#stream_}" "$@"
+        ;;
+
+    # --- Prompts ---
+    prompts_*)
+        exec "$MODULES/sg-prompts" "${COMMAND#prompts_}" "$@"
+        ;;
+
+    # --- Notebooks ---
+    notebooks_*)
+        exec "$MODULES/sg-notebooks" "${COMMAND#notebooks_}" "$@"
+        ;;
+
+    # --- Auth (admin) ---
+    auth_*)
+        exec "$MODULES/sg-auth" "${COMMAND#auth_}" "$@"
+        ;;
+
+    # --- RBAC (admin) ---
+    rbac_*)
+        exec "$MODULES/sg-rbac" "${COMMAND#rbac_}" "$@"
+        ;;
+
+    # --- External Services (admin) ---
+    ext_svc_*)
+        exec "$MODULES/sg-external-svc" "${COMMAND#ext_svc_}" "$@"
+        ;;
+
+    # --- Webhooks (admin) ---
+    webhooks_*)
+        exec "$MODULES/sg-webhooks" "${COMMAND#webhooks_}" "$@"
+        ;;
+
+    # --- Audit (admin) ---
+    audit_*)
+        exec "$MODULES/sg-audit" "${COMMAND#audit_}" "$@"
+        ;;
+
+    # --- Code Owners ---
+    owners_list_repos)
+        exec "$MODULES/code-owners" "list-repos" "$@"
+        ;;
+    owners_list_owners)
+        exec "$MODULES/code-owners" "list-owners" "$@"
+        ;;
+    owners_*)
+        exec "$MODULES/code-owners" "${COMMAND#owners_}" "$@"
+        ;;
+
+    # --- Code Insights ---
+    insights_*)
+        exec "$MODULES/code-insights" "${COMMAND#insights_}" "$@"
+        ;;
+
+    # --- Code Monitor ---
+    monitor_*)
+        exec "$MODULES/code-monitor" "${COMMAND#monitor_}" "$@"
+        ;;
+
+    # --- Batch Changes ---
+    batch_*)
+        exec "$MODULES/batch-changes" "${COMMAND#batch_}" "$@"
+        ;;
+
     *)
-        echo "Usage: sourcegraph <command> [args]"
-        echo ""
-        echo "Commands:"
-        echo "  keyword_search       Search code across repositories"
-        echo "  read_file            Read a file from a repository"
-        echo "  list_repos           List indexed repositories"
-        echo "  list_files           List files in a repository path"
-        echo "  symbols              Search for code symbols"
-        echo "  commit_search        Search commits by message/author/date"
-        echo "  diff_search          Search code changes (diffs)"
-        echo "  compare_revisions    Compare two revisions in a repo"
-        echo "  get_contributor_repos  Find repos by contributor"
-        echo "  health               Check service connectivity"
+        echo "ERROR: unknown command: $COMMAND" >&2
+        echo "Run 'sourcegraph' with no args for available commands." >&2
         exit 1
         ;;
 esac

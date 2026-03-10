@@ -1,9 +1,9 @@
 {
   "name": "sourcegraph",
-  "description": "Search code, browse repositories, read files, and explore commit history on a Sourcegraph instance via its GraphQL and search APIs.",
+  "description": "Sourcegraph — search, browse, stream, prompts, notebooks, ownership, insights, monitors, batch changes, auth, RBAC, webhooks, and audit.",
   "category": "code-search",
   "type": "native",
-  "max_output": 16384,
+  "max_output": 65536,
   "health": "sourcegraph health",
   "commands": {
     "keyword_search": {
@@ -276,6 +276,1626 @@
     "health": {
       "description": "Check connectivity to the Sourcegraph instance and verify authentication.",
       "args": {}
+    },
+    "stream_search": {
+      "description": "Execute a streaming search query. Collects Server-Sent Events from Sourcegraph's stream API and returns aggregated results. Faster than GraphQL for large result sets.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Sourcegraph search query (same syntax as keyword_search)"
+        },
+        "patternType": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Pattern type: literal, regexp, structural, keyword (default: keyword)"
+        },
+        "count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of results to collect (default: 50, max: 500)"
+        },
+        "timeout": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Search timeout in seconds (default: 30, max: 120)"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format: text or json (default: text)"
+        }
+      }
+    },
+    "stream_search_stats": {
+      "description": "Get search statistics (match count, repo count, duration) without returning full results. Useful for gauging query scope before running full search.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Sourcegraph search query"
+        },
+        "timeout": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Search timeout in seconds (default: 15)"
+        }
+      }
+    },
+    "stream_health": {
+      "description": "Check connectivity to Sourcegraph stream API endpoint.",
+      "args": {}
+    },
+    "prompts_list": {
+      "description": "List and search prompts in the Prompt Library. Returns prompt name, owner, visibility, and whether it is a draft.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter prompts by name or description substring"
+        },
+        "owner": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter by owner (user or org namespace, e.g. 'users/alice' or 'orgs/myteam')"
+        },
+        "first": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of prompts to return (default: 25)"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor for pagination (from previous response's endCursor)"
+        },
+        "orderBy": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Sort order: PROMPT_NAME_ALPHABETICAL, PROMPT_UPDATED_AT (default: PROMPT_UPDATED_AT)"
+        }
+      }
+    },
+    "prompts_get": {
+      "description": "Get a single prompt by ID, including its full definition text.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Prompt node ID"
+        }
+      }
+    },
+    "prompts_create": {
+      "description": "Create a new prompt in the Prompt Library.",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Prompt name (must be unique within the owner namespace)"
+        },
+        "description": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Human-readable description of what the prompt does"
+        },
+        "definitionText": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "The prompt template text"
+        },
+        "owner": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Owner namespace ID (user or org)"
+        },
+        "visibility": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Visibility: PUBLIC or SECRET (default: SECRET)"
+        },
+        "draft": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Whether the prompt is a draft: true or false (default: false)"
+        }
+      }
+    },
+    "prompts_update": {
+      "description": "Update an existing prompt's metadata or definition text.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Prompt node ID"
+        },
+        "name": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New name for the prompt"
+        },
+        "description": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New description"
+        },
+        "definitionText": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New prompt template text"
+        },
+        "visibility": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New visibility: PUBLIC or SECRET"
+        },
+        "draft": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Whether the prompt is a draft: true or false"
+        }
+      }
+    },
+    "prompts_delete": {
+      "description": "Delete a prompt from the Prompt Library.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Prompt node ID to delete"
+        }
+      }
+    },
+    "prompts_transfer_ownership": {
+      "description": "Transfer a prompt to a different user or organization.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Prompt node ID"
+        },
+        "newOwner": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "New owner namespace ID (user or org)"
+        }
+      }
+    },
+    "prompts_health": {
+      "description": "Check connectivity to Sourcegraph and verify prompt API access.",
+      "args": {}
+    },
+    "notebooks_list": {
+      "description": "List and search notebooks. Returns title, creator, visibility, star count, and creation date.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter notebooks by title substring"
+        },
+        "creator": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter by creator user ID"
+        },
+        "starred": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "If 'true', only show notebooks starred by the current user"
+        },
+        "first": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of notebooks to return (default: 25)"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor for pagination"
+        },
+        "orderBy": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Sort: NOTEBOOK_UPDATED_AT, NOTEBOOK_CREATED_AT, NOTEBOOK_STAR_COUNT (default: NOTEBOOK_UPDATED_AT)"
+        }
+      }
+    },
+    "notebooks_get": {
+      "description": "Get a single notebook by ID, including all blocks (markdown, query, file, symbol).",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Notebook node ID"
+        }
+      }
+    },
+    "notebooks_create": {
+      "description": "Create a new notebook with blocks. Blocks can be MARKDOWN, QUERY, FILE, or SYMBOL type.",
+      "args": {
+        "title": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Notebook title"
+        },
+        "blocks": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "JSON array of block objects. Each block: {\"type\":\"MARKDOWN\",\"markdownInput\":\"text\"} or {\"type\":\"QUERY\",\"queryInput\":\"repo:foo lang:go\"} or {\"type\":\"FILE\",\"fileInput\":{\"repositoryName\":\"...\",\"filePath\":\"...\",\"revision\":\"HEAD\"}} or {\"type\":\"SYMBOL\",\"symbolInput\":{\"repositoryName\":\"...\",\"filePath\":\"...\",\"revision\":\"HEAD\",\"symbolName\":\"...\"}}"
+        },
+        "namespace": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Namespace ID (user or org) that owns this notebook"
+        },
+        "public": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Whether the notebook is public: true or false (default: false)"
+        }
+      }
+    },
+    "notebooks_update": {
+      "description": "Update an existing notebook's title, blocks, or visibility.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Notebook node ID"
+        },
+        "title": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New title"
+        },
+        "blocks": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New blocks JSON array (replaces all existing blocks)"
+        },
+        "public": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New visibility: true or false"
+        }
+      }
+    },
+    "notebooks_delete": {
+      "description": "Delete a notebook.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Notebook node ID to delete"
+        }
+      }
+    },
+    "notebooks_add_star": {
+      "description": "Star a notebook to bookmark it.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Notebook node ID to star"
+        }
+      }
+    },
+    "notebooks_remove_star": {
+      "description": "Remove star from a notebook.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Notebook node ID to unstar"
+        }
+      }
+    },
+    "notebooks_health": {
+      "description": "Check connectivity to Sourcegraph and verify notebook API access.",
+      "args": {}
+    },
+    "auth_list_auth_providers": {
+      "description": "List all configured authentication providers (builtin, SAML, OIDC, OAuth, HTTP header).",
+      "args": {}
+    },
+    "auth_get_auth_provider": {
+      "description": "Get detailed configuration for a specific auth provider.",
+      "args": {
+        "serviceType": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Provider service type: builtin, saml, openidconnect, http-header, github, gitlab"
+        }
+      }
+    },
+    "auth_list_users": {
+      "description": "List Sourcegraph users with optional search filter.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter users by username or email substring"
+        },
+        "first": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of users to return (default: 25)"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor for pagination"
+        }
+      }
+    },
+    "auth_get_user": {
+      "description": "Get detailed information about a specific user.",
+      "args": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Username to look up"
+        }
+      }
+    },
+    "auth_create_user": {
+      "description": "Create a new Sourcegraph user account. Requires site admin.",
+      "args": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Username for the new user"
+        },
+        "email": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Email address for the new user"
+        }
+      }
+    },
+    "auth_delete_user": {
+      "description": "Delete a Sourcegraph user account. Requires site admin.",
+      "args": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Username to delete"
+        },
+        "hard": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "If 'true', hard-delete (purge all data). Default is soft delete."
+        }
+      }
+    },
+    "auth_set_site_admin": {
+      "description": "Promote or demote a user's site admin status. Requires site admin.",
+      "args": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Username to modify"
+        },
+        "admin": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Set to 'true' to promote, 'false' to demote"
+        }
+      }
+    },
+    "auth_get_site_config_auth": {
+      "description": "Read the authentication section of the site configuration. Requires site admin.",
+      "args": {}
+    },
+    "auth_update_site_config_auth": {
+      "description": "Update the authentication section of the site configuration. DANGER: changes take effect immediately. Requires site admin.",
+      "args": {
+        "config": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "JSON object with auth config fields to update (merged with existing config)"
+        }
+      }
+    },
+    "auth_health": {
+      "description": "Check connectivity and verify site admin access.",
+      "args": {}
+    },
+    "rbac_list_roles": {
+      "description": "List all roles defined in the Sourcegraph instance.",
+      "args": {}
+    },
+    "rbac_get_role": {
+      "description": "Get a role's details including its assigned permissions.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Role ID"
+        }
+      }
+    },
+    "rbac_create_role": {
+      "description": "Create a new role. Requires site admin.",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Role name"
+        },
+        "permissions": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Comma-separated list of permission IDs to assign"
+        }
+      }
+    },
+    "rbac_delete_role": {
+      "description": "Delete a role. Requires site admin.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Role ID to delete"
+        }
+      }
+    },
+    "rbac_assign_role": {
+      "description": "Assign a role to a user. Requires site admin.",
+      "args": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Username to assign the role to"
+        },
+        "roleId": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Role ID to assign"
+        }
+      }
+    },
+    "rbac_revoke_role": {
+      "description": "Revoke a role from a user. Requires site admin.",
+      "args": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Username to revoke the role from"
+        },
+        "roleId": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Role ID to revoke"
+        }
+      }
+    },
+    "rbac_list_permissions": {
+      "description": "List all available permissions that can be assigned to roles.",
+      "args": {}
+    },
+    "rbac_get_repo_permissions": {
+      "description": "Get permission information for a specific repository.",
+      "args": {
+        "repo": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Repository name (e.g. 'github.com/org/repo')"
+        }
+      }
+    },
+    "rbac_sync_permissions": {
+      "description": "Trigger a permissions sync. Can sync all users or a specific user. Requires site admin.",
+      "args": {
+        "username": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Specific user to sync (omit for full sync)"
+        }
+      }
+    },
+    "rbac_get_sync_status": {
+      "description": "Get the current status of the permissions sync job.",
+      "args": {}
+    },
+    "rbac_health": {
+      "description": "Check connectivity and verify RBAC API access.",
+      "args": {}
+    },
+    "ext_svc_list": {
+      "description": "List all configured external service connections.",
+      "args": {
+        "kind": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter by kind: GITHUB, GITLAB, BITBUCKETCLOUD, BITBUCKETSERVER, GITOLITE, PERFORCE, GERRIT, AZUREDEVOPS, OTHER"
+        },
+        "first": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of results (default: 25)"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor for pagination"
+        }
+      }
+    },
+    "ext_svc_get": {
+      "description": "Get detailed configuration for a specific external service. Secrets in the config are redacted.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "External service node ID"
+        }
+      }
+    },
+    "ext_svc_create": {
+      "description": "Add a new external service connection. Requires site admin.",
+      "args": {
+        "kind": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Service kind: GITHUB, GITLAB, BITBUCKETCLOUD, BITBUCKETSERVER, GITOLITE, PERFORCE, GERRIT, AZUREDEVOPS, OTHER"
+        },
+        "displayName": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Human-readable display name"
+        },
+        "config": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "JSON configuration string (varies by kind — see Sourcegraph docs for schema)"
+        }
+      }
+    },
+    "ext_svc_update": {
+      "description": "Update an existing external service connection. Requires site admin.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "External service node ID"
+        },
+        "displayName": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New display name"
+        },
+        "config": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New JSON configuration string"
+        }
+      }
+    },
+    "ext_svc_delete": {
+      "description": "Remove an external service connection. Requires site admin.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "External service node ID to delete"
+        }
+      }
+    },
+    "ext_svc_sync": {
+      "description": "Trigger a repository sync for an external service. Requires site admin.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "External service node ID to sync"
+        }
+      }
+    },
+    "ext_svc_check_connection": {
+      "description": "Test connectivity and authentication for an external service.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "External service node ID to test"
+        }
+      }
+    },
+    "ext_svc_health": {
+      "description": "Check connectivity and verify external service API access.",
+      "args": {}
+    },
+    "webhooks_list": {
+      "description": "List all configured webhooks.",
+      "args": {
+        "first": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of webhooks to return (default: 25)"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor for pagination"
+        }
+      }
+    },
+    "webhooks_get": {
+      "description": "Get detailed information about a specific webhook.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Webhook node ID"
+        }
+      }
+    },
+    "webhooks_create": {
+      "description": "Create a new webhook. Requires site admin.",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Webhook name"
+        },
+        "codeHostKind": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Code host kind: GITHUB, GITLAB, BITBUCKETCLOUD, BITBUCKETSERVER"
+        },
+        "codeHostURN": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Code host URN (e.g. 'https://github.com')"
+        },
+        "secret": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Webhook secret for signature verification"
+        }
+      }
+    },
+    "webhooks_update": {
+      "description": "Update an existing webhook. Requires site admin.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Webhook node ID"
+        },
+        "name": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New name"
+        },
+        "codeHostKind": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New code host kind"
+        },
+        "codeHostURN": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New code host URN"
+        },
+        "secret": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New webhook secret"
+        }
+      }
+    },
+    "webhooks_delete": {
+      "description": "Delete a webhook. Requires site admin.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Webhook node ID to delete"
+        }
+      }
+    },
+    "webhooks_list_logs": {
+      "description": "List delivery logs for a webhook. Shows request/response status for recent deliveries.",
+      "args": {
+        "webhookId": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Webhook node ID"
+        },
+        "first": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of logs (default: 25)"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor for pagination"
+        },
+        "onlyErrors": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "If 'true', only show failed deliveries"
+        }
+      }
+    },
+    "webhooks_get_log": {
+      "description": "Get detailed delivery log including full request and response bodies.",
+      "args": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Webhook log entry ID"
+        }
+      }
+    },
+    "webhooks_health": {
+      "description": "Check connectivity and verify webhook API access.",
+      "args": {}
+    },
+    "audit_user_events": {
+      "description": "List event logs for a specific user. Events include searches, page views, feature usage, and admin actions.",
+      "args": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Username to query events for"
+        },
+        "eventName": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter by event name (e.g. 'SearchSubmitted', 'ViewRepository', 'ExternalServiceCreated')"
+        },
+        "first": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of events to return (default: 50)"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor for pagination"
+        }
+      }
+    },
+    "audit_all_user_events": {
+      "description": "Aggregate event logs across all users. Iterates users and collects recent events. Site admin required.",
+      "args": {
+        "eventName": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Filter by event name"
+        },
+        "maxUsers": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of users to query (default: 50)"
+        },
+        "eventsPerUser": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum events per user (default: 10)"
+        }
+      }
+    },
+    "audit_outbound_requests": {
+      "description": "List outbound HTTP requests made by the Sourcegraph instance (e.g. to code hosts, auth providers). Site admin required.",
+      "args": {
+        "first": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of requests to return (default: 50)"
+        },
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor for pagination"
+        }
+      }
+    },
+    "audit_slow_requests": {
+      "description": "List recently captured slow GraphQL requests. Useful for performance monitoring. Site admin required.",
+      "args": {
+        "after": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Cursor to fetch newer entries"
+        }
+      }
+    },
+    "audit_health": {
+      "description": "Check connectivity and verify event log API access.",
+      "args": {}
+    },
+    "owners_sync": {
+      "description": "Fetch and parse CODEOWNERS files from all indexed repos (or a specific repo)",
+      "args": {
+        "repo": {
+          "required": false,
+          "description": "Sync a specific repo only (e.g. \"github.com/org/repo\")",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "owners_get": {
+      "description": "Find owners for a file path in a repo (last matching CODEOWNERS rule wins)",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name (e.g. \"github.com/org/repo\")",
+          "type": "string"
+        },
+        "path": {
+          "positional": true,
+          "required": true,
+          "description": "File path to check ownership for",
+          "type": "string"
+        }
+      }
+    },
+    "owners_create": {
+      "description": "Create/upload a CODEOWNERS file for a repo — parses content, validates format, and stores rules in SQLite",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name (e.g. \"github.com/org/repo\")",
+          "type": "string"
+        },
+        "file": {
+          "required": false,
+          "description": "Path to a local CODEOWNERS file to upload",
+          "type": "string",
+          "positional": false
+        },
+        "content": {
+          "required": false,
+          "description": "CODEOWNERS content as a string (used if --file is not provided)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "owners_update": {
+      "description": "Update an existing CODEOWNERS file for a repo — replaces all existing rules with new content",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name (e.g. \"github.com/org/repo\")",
+          "type": "string"
+        },
+        "file": {
+          "required": false,
+          "description": "Path to the updated CODEOWNERS file",
+          "type": "string",
+          "positional": false
+        },
+        "content": {
+          "required": false,
+          "description": "Updated CODEOWNERS content as a string (used if --file is not provided)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "owners_delete": {
+      "description": "Delete a CODEOWNERS file entry and all its rules for a repo from the local database",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name to remove from the database",
+          "type": "string"
+        }
+      }
+    },
+    "owners_search": {
+      "description": "Find all patterns and repos owned by a person or team",
+      "args": {
+        "owner": {
+          "positional": true,
+          "required": true,
+          "description": "Owner handle (e.g. @username or @org/team)",
+          "type": "string"
+        },
+        "repo": {
+          "required": false,
+          "description": "Limit search to a specific repo",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "owners_list_repos": {
+      "description": "List repos that have CODEOWNERS files with rule counts and last-synced times",
+      "args": {}
+    },
+    "owners_list_owners": {
+      "description": "List all known owners across all repos with rule counts",
+      "args": {
+        "repo": {
+          "required": false,
+          "description": "Limit to a specific repo",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "owners_unowned": {
+      "description": "Find files with no CODEOWNERS coverage in a repo",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name to check for unowned files",
+          "type": "string"
+        }
+      }
+    },
+    "owners_health": {
+      "description": "Check Sourcegraph connectivity and database state",
+      "args": {}
+    },
+    "insights_create_insight": {
+      "description": "Create a new insight (tracked metric) — aligns with createLineChartSearchInsight",
+      "args": {
+        "name": {
+          "required": true,
+          "description": "Insight name (e.g. \"deprecated-api-usage\")",
+          "type": "string",
+          "positional": false
+        },
+        "query": {
+          "required": true,
+          "description": "Sourcegraph search query (e.g. \"lang:go fmt.Println\")",
+          "type": "string",
+          "positional": false
+        },
+        "description": {
+          "required": false,
+          "description": "Human-readable description of the insight",
+          "type": "string",
+          "positional": false
+        },
+        "interval": {
+          "required": false,
+          "description": "Collection interval in hours (default: 24, informational — actual scheduling is external)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "insights_update_insight": {
+      "description": "Update an insight's query, description, or interval — aligns with updateLineChartSearchInsight",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the insight to update",
+          "type": "string"
+        },
+        "query": {
+          "required": false,
+          "description": "New Sourcegraph search query",
+          "type": "string",
+          "positional": false
+        },
+        "description": {
+          "required": false,
+          "description": "New human-readable description",
+          "type": "string",
+          "positional": false
+        },
+        "interval": {
+          "required": false,
+          "description": "New collection interval in hours",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "insights_collect": {
+      "description": "Run a collection for a specific insight or all insights",
+      "args": {
+        "name": {
+          "required": false,
+          "description": "Specific insight to collect (if omitted, collects all)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "insights_collect_all": {
+      "description": "Collect data for all insights",
+      "args": {}
+    },
+    "insights_series_points": {
+      "description": "Show the time-series data points for an insight with ASCII sparkline chart — aligns with InsightsSeries.points",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the insight",
+          "type": "string"
+        },
+        "days": {
+          "required": false,
+          "description": "Number of days to show (default: 30)",
+          "type": "string",
+          "positional": false
+        },
+        "format": {
+          "required": false,
+          "description": "Output format: text or json (default: text)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "insights_compare": {
+      "description": "Compare two insights side by side",
+      "args": {
+        "name1": {
+          "positional": true,
+          "required": true,
+          "description": "First insight name",
+          "type": "string"
+        },
+        "name2": {
+          "positional": true,
+          "required": true,
+          "description": "Second insight name",
+          "type": "string"
+        },
+        "days": {
+          "required": false,
+          "description": "Number of days to show (default: 30)",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "insights_live_preview": {
+      "description": "Get current values for all insights without storing results — aligns with searchInsightLivePreview",
+      "args": {}
+    },
+    "insights_list_views": {
+      "description": "List all insight views with their status — aligns with insightViews",
+      "args": {}
+    },
+    "insights_delete_view": {
+      "description": "Delete an insight view and all its collected data — aligns with deleteInsightView",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the insight to delete",
+          "type": "string"
+        }
+      }
+    },
+    "insights_validate_query": {
+      "description": "Validate a search query for use in insights — aligns with validateScopedInsightQuery",
+      "args": {
+        "query": {
+          "positional": true,
+          "required": true,
+          "description": "Sourcegraph search query to validate",
+          "type": "string"
+        }
+      }
+    },
+    "insights_create_dashboard": {
+      "description": "Create a named dashboard grouping insights — aligns with createInsightsDashboard",
+      "args": {
+        "name": {
+          "required": true,
+          "description": "Dashboard name",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "insights_list_dashboards": {
+      "description": "List all dashboards — aligns with insightsDashboards",
+      "args": {}
+    },
+    "insights_add_to_dashboard": {
+      "description": "Add an insight view to a dashboard — aligns with addInsightViewToDashboard",
+      "args": {
+        "insight": {
+          "required": true,
+          "description": "Insight name to add",
+          "type": "string",
+          "positional": false
+        },
+        "dashboard": {
+          "required": true,
+          "description": "Dashboard name to add the insight to",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "insights_remove_from_dashboard": {
+      "description": "Remove an insight view from a dashboard — aligns with removeInsightViewFromDashboard",
+      "args": {
+        "insight": {
+          "required": true,
+          "description": "Insight name to remove",
+          "type": "string",
+          "positional": false
+        },
+        "dashboard": {
+          "required": true,
+          "description": "Dashboard name to remove the insight from",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "insights_health": {
+      "description": "Check Sourcegraph connectivity, Vault credentials, and database state",
+      "args": {}
+    },
+    "monitor_create": {
+      "description": "Create a new code monitor (maps to createCodeMonitor)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Monitor name (unique identifier)"
+        },
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Sourcegraph search query (should include type:diff or type:commit)"
+        },
+        "webhook": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Webhook URL to POST alerts to (e.g., Slack incoming webhook)"
+        },
+        "interval": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Check interval in minutes (default: 15, informational only)"
+        }
+      }
+    },
+    "monitor_update": {
+      "description": "Update a monitor's query, webhook, or interval (maps to updateCodeMonitor)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to update"
+        },
+        "query": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New Sourcegraph search query"
+        },
+        "webhook": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New webhook URL"
+        },
+        "interval": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "New check interval in minutes"
+        }
+      }
+    },
+    "monitor_delete": {
+      "description": "Delete a monitor and its event history (maps to deleteCodeMonitor)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to delete"
+        }
+      }
+    },
+    "monitor_toggle": {
+      "description": "Enable or disable a monitor (maps to toggleCodeMonitor)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to toggle"
+        },
+        "enabled": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Set to 'true' to enable or 'false' to disable"
+        }
+      }
+    },
+    "monitor_trigger_check": {
+      "description": "Evaluate trigger query for a specific monitor (maps to trigger evaluation concept)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Specific monitor to check (if omitted, checks all)"
+        },
+        "since": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Override 'since' time in ISO8601 format (default: last check time from DB)"
+        }
+      }
+    },
+    "monitor_trigger_check_all": {
+      "description": "Evaluate trigger queries for all enabled monitors",
+      "args": {}
+    },
+    "monitor_list": {
+      "description": "List all monitors with their status (via currentUser.monitors pattern)",
+      "args": {}
+    },
+    "monitor_events": {
+      "description": "Show recent trigger events for a monitor (maps to MonitorTriggerEventConnection)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor"
+        },
+        "limit": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of events to show (default: 20)"
+        }
+      }
+    },
+    "monitor_test_action": {
+      "description": "Send a test webhook for a monitor (maps to triggerTestWebhookAction)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to test"
+        }
+      }
+    },
+    "monitor_reset": {
+      "description": "Reset trigger timestamps to re-evaluate from scratch (maps to resetTriggerQueryTimestamps)",
+      "args": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to reset"
+        }
+      }
+    },
+    "monitor_health": {
+      "description": "Check Sourcegraph connectivity and database state",
+      "args": {}
+    },
+    "batch_new": {
+      "description": "Create a new batch change spec (saved locally, not yet executed)",
+      "args": {
+        "name": {
+          "required": true,
+          "description": "Batch change name (used as identifier)",
+          "type": "string",
+          "positional": false
+        },
+        "description": {
+          "required": false,
+          "description": "Human-readable description of the batch change",
+          "type": "string",
+          "positional": false
+        },
+        "query": {
+          "required": true,
+          "description": "Sourcegraph search query to find target repos (e.g. \"repo:myorg/ file:package.json lodash\")",
+          "type": "string",
+          "positional": false
+        },
+        "script": {
+          "required": true,
+          "description": "Shell command to run inside each repo clone (e.g. \"sed -i 's/old/new/g' file.txt\")",
+          "type": "string",
+          "positional": false
+        },
+        "branch": {
+          "required": false,
+          "description": "Branch name to create in each repo (default: batch/{name})",
+          "type": "string",
+          "positional": false
+        },
+        "commit-msg": {
+          "required": false,
+          "description": "Commit message for each repo (default: \"batch-change: {name}\")",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "batch_apply": {
+      "description": "Execute a batch change: clone repos, apply script, commit, push, and open GitLab MRs",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change to execute",
+          "type": "string"
+        },
+        "dry-run": {
+          "required": false,
+          "description": "Show what would happen without making any changes",
+          "type": "string",
+          "positional": false
+        }
+      }
+    },
+    "batch_preview": {
+      "description": "Dry-run a batch change: show which repos match and what would happen without making any changes",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change to preview",
+          "type": "string"
+        }
+      }
+    },
+    "batch_validate": {
+      "description": "Validate a batch change spec exists and is well-formed (required fields, valid Sourcegraph query)",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change to validate",
+          "type": "string"
+        }
+      }
+    },
+    "batch_repositories": {
+      "description": "List repos that would be affected by a batch change without cloning or changing anything",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change whose target repos to list",
+          "type": "string"
+        }
+      }
+    },
+    "batch_status": {
+      "description": "Show the status of a batch change (open/merged/closed MRs)",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change to check",
+          "type": "string"
+        }
+      }
+    },
+    "batch_list": {
+      "description": "List all batch change specs",
+      "args": {}
+    },
+    "batch_health": {
+      "description": "Check connectivity to Sourcegraph and GitLab",
+      "args": {}
+    },
+    "go_to_definition": {
+      "description": "Find the definition of a symbol from a usage location. Uses compiler-accurate LSP when available, falls back to AST-based analysis.",
+      "args": {
+        "repo": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Repository name (e.g. 'host.docker.internal/root/repo')"
+        },
+        "path": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "File path within the repository"
+        },
+        "symbol": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Symbol name to find definition for"
+        },
+        "revision": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Revision to use (default: HEAD)"
+        }
+      }
+    },
+    "find_references": {
+      "description": "Find all references to a symbol across the codebase. Uses compiler-accurate LSP when available, falls back to AST-based analysis.",
+      "args": {
+        "repo": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Repository name (e.g. 'host.docker.internal/root/repo')"
+        },
+        "path": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "File path within the repository"
+        },
+        "symbol": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "Symbol name to find references for"
+        },
+        "revision": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Revision to use (default: HEAD)"
+        }
+      }
+    },
+    "nls_search": {
+      "description": "Natural language semantic search with linguistic matching. Uses hybrid BM25 + TF-IDF + neural embeddings for flexible search that understands intent, not just exact keywords.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Natural language search query (e.g. 'error handling for HTTP requests')"
+        },
+        "repo": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Limit search to a specific repository"
+        },
+        "count": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum results to return (default: 10)"
+        }
+      }
     }
   }
 }

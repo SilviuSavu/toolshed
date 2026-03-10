@@ -1,0 +1,678 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# batch-changes — multi-repo change automation via Sourcegraph + GitLab
+#
+# Commands aligned with `src batch` CLI naming:
+#   new          Create a new batch change spec
+#   apply        Execute a batch change (clone, script, push, open MRs)
+#   preview      Dry-run — show what apply would do without touching anything
+#   validate     Check that a spec exists and is well-formed
+#   repositories List repos that would be affected without running anything
+#   status       Show MR status for an executed batch change
+#   list         List all batch change specs
+#   health       Check service connectivity
+###############################################################################
+
+DATA_DIR="$HOME/.toolshed/data/batch-changes"
+CLONE_BASE="/tmp/batch-changes"
+GITLAB_URL="http://localhost"
+GITLAB_SSH_HOST="localhost"
+GITLAB_SSH_PORT="2222"
+SSH_KEY="$HOME/.ssh/id_ed25519"
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+TOOLSHED_URL="${TOOLSHED_URL:-http://localhost:8081}"
+
+mkdir -p "$DATA_DIR"
+
+# ---------------------------------------------------------------------------
+# Credential helpers
+# ---------------------------------------------------------------------------
+
+load_gitlab_token() {
+  GITLAB_TOKEN=$(curl -sf \
+    -H "X-Vault-Token: $VAULT_TOKEN" \
+    "$VAULT_ADDR/v1/secret/data/gitlab" | jq -r '.data.data.value')
+  if [[ -z "$GITLAB_TOKEN" || "$GITLAB_TOKEN" == "null" ]]; then
+    echo "ERROR: failed to retrieve GitLab token from Vault" >&2
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Toolshed JSON-RPC helper
+# ---------------------------------------------------------------------------
+
+ts_call() {
+  local tool="$1"
+  local args_json="$2"
+  local response
+  response=$(curl -sf --max-time 30 -X POST "$TOOLSHED_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args_json}}")
+  local is_err
+  is_err=$(echo "$response" | jq -r '.result.isError // false')
+  if [[ "$is_err" == "true" ]]; then
+    echo "ERROR: $(echo "$response" | jq -r '.result.content[0].text')" >&2
+    return 1
+  fi
+  echo "$response" | jq -r '.result.content[0].text'
+}
+
+# ---------------------------------------------------------------------------
+# Sourcegraph: search for repos matching a query
+# ---------------------------------------------------------------------------
+
+sourcegraph_search_repos() {
+  local query="$1"
+  local args_json
+  args_json=$(jq -n --arg q "$query" '{"query": $q, "format": "raw", "count": "100"}')
+  local result
+  result=$(ts_call "sourcegraph__keyword_search" "$args_json") || return 1
+  echo "$result" | jq -r '[.data.search.results.results[] | (.repository.name // .name)] | unique | .[]' 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Sourcegraph: validate that a search query is syntactically valid
+# ---------------------------------------------------------------------------
+
+sourcegraph_validate_query() {
+  local query="$1"
+  local args_json
+  args_json=$(jq -n --arg q "$query" '{"query": $q, "format": "raw", "count": "0"}')
+  local result
+  result=$(ts_call "sourcegraph__keyword_search" "$args_json" 2>&1) || {
+    echo "ERROR: Sourcegraph query is invalid: $result" >&2
+    return 1
+  }
+  # Check for GraphQL errors in the response
+  local errors
+  errors=$(echo "$result" | jq -r '.errors // empty | .[].message' 2>/dev/null)
+  if [[ -n "$errors" ]]; then
+    echo "ERROR: Sourcegraph query is invalid:" >&2
+    echo "$errors" >&2
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# GitLab helpers
+# ---------------------------------------------------------------------------
+
+gitlab_get_project_id() {
+  local project_path="$1"   # namespace/project
+  local encoded
+  encoded=$(printf '%s' "$project_path" | jq -sRr @uri)
+  curl -sf \
+    -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+    "$GITLAB_URL/api/v4/projects/$encoded" \
+  | jq -r '.id'
+}
+
+gitlab_create_mr() {
+  local project_id="$1"
+  local source_branch="$2"
+  local title="$3"
+  local description="$4"
+
+  curl -sf \
+    -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+      --arg sb "$source_branch" \
+      --arg title "$title" \
+      --arg desc "$description" \
+      '{
+        source_branch: $sb,
+        target_branch: "main",
+        title: $title,
+        description: $desc,
+        remove_source_branch: true
+      }')" \
+    "$GITLAB_URL/api/v4/projects/$project_id/merge_requests"
+}
+
+gitlab_mr_status() {
+  local project_id="$1"
+  local mr_iid="$2"
+  curl -sf \
+    -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+    "$GITLAB_URL/api/v4/projects/$project_id/merge_requests/$mr_iid" \
+  | jq -r '.state'
+}
+
+# ---------------------------------------------------------------------------
+# Extract namespace/project from Sourcegraph repo name
+# Format: "localhost/{namespace}/{project}" or "192.168.1.10/{namespace}/{project}"
+# ---------------------------------------------------------------------------
+
+parse_repo_path() {
+  local src_name="$1"
+  # Strip leading host portion
+  echo "$src_name" | sed 's|^[^/]*/||'
+}
+
+# ===========================================================================
+# COMMANDS
+# ===========================================================================
+
+cmd_new() {
+  local name="" description="" query="" script="" branch="" commit_msg=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)       name="$2";       shift 2 ;;
+      --description) description="$2"; shift 2 ;;
+      --query)      query="$2";      shift 2 ;;
+      --script)     script="$2";     shift 2 ;;
+      --branch)     branch="$2";     shift 2 ;;
+      --commit-msg) commit_msg="$2"; shift 2 ;;
+      *) echo "ERROR: unknown argument: $1" >&2; return 1 ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: --name is required" >&2; return 1; fi
+  if [[ -z "$query" ]]; then echo "ERROR: --query is required" >&2; return 1; fi
+  if [[ -z "$script" ]]; then echo "ERROR: --script is required" >&2; return 1; fi
+
+  branch="${branch:-batch/$name}"
+  commit_msg="${commit_msg:-batch-change: $name}"
+
+  local spec_file="$DATA_DIR/${name}.json"
+
+  jq -n \
+    --arg name "$name" \
+    --arg description "$description" \
+    --arg query "$query" \
+    --arg script "$script" \
+    --arg branch "$branch" \
+    --arg commit_msg "$commit_msg" \
+    --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      name: $name,
+      description: $description,
+      query: $query,
+      script: $script,
+      branch: $branch,
+      commit_msg: $commit_msg,
+      created_at: $created_at
+    }' > "$spec_file"
+
+  echo "Batch change spec saved: $spec_file"
+  jq . "$spec_file"
+}
+
+cmd_apply() {
+  local name="" dry_run=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run=true; shift ;;
+      -*) echo "ERROR: unknown flag: $1" >&2; return 1 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: name is required" >&2; return 1; fi
+
+  local spec_file="$DATA_DIR/${name}.json"
+  if [[ ! -f "$spec_file" ]]; then
+    echo "ERROR: batch change '$name' not found at $spec_file" >&2
+    return 1
+  fi
+
+  local query script branch commit_msg description
+  query=$(jq -r '.query' "$spec_file")
+  script=$(jq -r '.script' "$spec_file")
+  branch=$(jq -r '.branch' "$spec_file")
+  commit_msg=$(jq -r '.commit_msg' "$spec_file")
+  description=$(jq -r '.description' "$spec_file")
+
+  load_gitlab_token
+
+  echo "Searching Sourcegraph for repos matching: $query"
+  local repos
+  repos=$(sourcegraph_search_repos "$query")
+
+  if [[ -z "$repos" ]]; then
+    echo "No repos matched the query."
+    return 0
+  fi
+
+  local repo_count
+  repo_count=$(echo "$repos" | wc -l | tr -d ' ')
+  echo "Found $repo_count repo(s):"
+  echo "$repos" | sed 's/^/  /'
+
+  if [[ "$dry_run" == "true" ]]; then
+    echo ""
+    echo "[DRY RUN] Would perform the following for each repo:"
+    echo "  - Clone via SSH (ssh://git@${GITLAB_SSH_HOST}:${GITLAB_SSH_PORT}/...)"
+    echo "  - Create branch: $branch"
+    echo "  - Run script: $script"
+    echo "  - Commit with message: $commit_msg"
+    echo "  - Push and open GitLab MR"
+    return 0
+  fi
+
+  local clone_dir="$CLONE_BASE/$name"
+  mkdir -p "$clone_dir"
+
+  local results_file="$DATA_DIR/${name}-results.json"
+  echo '[]' > "$results_file"
+
+  local success_count=0 fail_count=0
+
+  while IFS= read -r repo; do
+    local repo_path
+    repo_path=$(parse_repo_path "$repo")
+    local namespace project
+    namespace=$(echo "$repo_path" | cut -d'/' -f1)
+    project=$(echo "$repo_path" | cut -d'/' -f2)
+
+    echo ""
+    echo "--- Processing: $repo_path ---"
+
+    local repo_clone_dir="$clone_dir/$namespace/$project"
+    local ssh_url="ssh://git@${GITLAB_SSH_HOST}:${GITLAB_SSH_PORT}/${repo_path}.git"
+
+    # Clone
+    echo "  Cloning $ssh_url ..."
+    if ! GIT_SSH_COMMAND="ssh -i $SSH_KEY -o StrictHostKeyChecking=no -p $GITLAB_SSH_PORT" \
+        git clone --depth 1 "$ssh_url" "$repo_clone_dir" 2>&1; then
+      echo "  ERROR: clone failed for $repo_path" >&2
+      jq --arg repo "$repo_path" --arg status "clone_failed" \
+        '. += [{"repo": $repo, "status": $status}]' "$results_file" > "$results_file.tmp" \
+        && mv "$results_file.tmp" "$results_file"
+      ((fail_count++)) || true
+      continue
+    fi
+
+    # Create branch
+    echo "  Creating branch: $branch"
+    git -C "$repo_clone_dir" checkout -b "$branch" 2>&1
+
+    # Run script
+    echo "  Running script ..."
+    if ! (cd "$repo_clone_dir" && bash -c "$script") 2>&1; then
+      echo "  ERROR: script failed for $repo_path" >&2
+      jq --arg repo "$repo_path" --arg status "script_failed" \
+        '. += [{"repo": $repo, "status": $status}]' "$results_file" > "$results_file.tmp" \
+        && mv "$results_file.tmp" "$results_file"
+      ((fail_count++)) || true
+      continue
+    fi
+
+    # Check for changes
+    if git -C "$repo_clone_dir" diff --quiet && git -C "$repo_clone_dir" diff --cached --quiet; then
+      echo "  No changes detected, skipping."
+      jq --arg repo "$repo_path" --arg status "no_changes" \
+        '. += [{"repo": $repo, "status": $status}]' "$results_file" > "$results_file.tmp" \
+        && mv "$results_file.tmp" "$results_file"
+      continue
+    fi
+
+    # Commit
+    echo "  Committing changes ..."
+    git -C "$repo_clone_dir" add -A
+    git -C "$repo_clone_dir" commit -m "$commit_msg" 2>&1
+
+    # Push
+    echo "  Pushing branch ..."
+    if ! GIT_SSH_COMMAND="ssh -i $SSH_KEY -o StrictHostKeyChecking=no -p $GITLAB_SSH_PORT" \
+        git -C "$repo_clone_dir" push -u origin "$branch" 2>&1; then
+      echo "  ERROR: push failed for $repo_path" >&2
+      jq --arg repo "$repo_path" --arg status "push_failed" \
+        '. += [{"repo": $repo, "status": $status}]' "$results_file" > "$results_file.tmp" \
+        && mv "$results_file.tmp" "$results_file"
+      ((fail_count++)) || true
+      continue
+    fi
+
+    # Open MR
+    echo "  Opening MR on GitLab ..."
+    local project_id
+    project_id=$(gitlab_get_project_id "$repo_path")
+
+    if [[ -z "$project_id" || "$project_id" == "null" ]]; then
+      echo "  ERROR: could not resolve GitLab project ID for $repo_path" >&2
+      jq --arg repo "$repo_path" --arg status "project_id_failed" \
+        '. += [{"repo": $repo, "status": $status}]' "$results_file" > "$results_file.tmp" \
+        && mv "$results_file.tmp" "$results_file"
+      ((fail_count++)) || true
+      continue
+    fi
+
+    local mr_response
+    mr_response=$(gitlab_create_mr "$project_id" "$branch" "$commit_msg" "$description")
+    local mr_iid mr_url
+    mr_iid=$(echo "$mr_response" | jq -r '.iid')
+    mr_url=$(echo "$mr_response" | jq -r '.web_url')
+
+    if [[ -z "$mr_iid" || "$mr_iid" == "null" ]]; then
+      echo "  ERROR: MR creation failed for $repo_path" >&2
+      echo "  Response: $mr_response"
+      jq --arg repo "$repo_path" --arg status "mr_failed" \
+        '. += [{"repo": $repo, "status": $status}]' "$results_file" > "$results_file.tmp" \
+        && mv "$results_file.tmp" "$results_file"
+      ((fail_count++)) || true
+      continue
+    fi
+
+    echo "  MR created: $mr_url"
+    jq --arg repo "$repo_path" \
+       --arg status "mr_opened" \
+       --arg mr_iid "$mr_iid" \
+       --arg mr_url "$mr_url" \
+       --arg project_id "$project_id" \
+      '. += [{"repo": $repo, "status": $status, "mr_iid": ($mr_iid | tonumber), "mr_url": $mr_url, "project_id": ($project_id | tonumber)}]' \
+      "$results_file" > "$results_file.tmp" \
+      && mv "$results_file.tmp" "$results_file"
+
+    ((success_count++)) || true
+  done <<< "$repos"
+
+  # Cleanup clones
+  echo ""
+  echo "Cleaning up clones ..."
+  rm -rf "$clone_dir"
+
+  echo ""
+  echo "Batch change '$name' completed: $success_count succeeded, $fail_count failed."
+  echo "Results saved to: $results_file"
+  jq . "$results_file"
+}
+
+cmd_preview() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) echo "ERROR: unknown flag: $1" >&2; return 1 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: name is required" >&2; return 1; fi
+
+  # Delegate to apply with --dry-run forced on
+  cmd_apply --dry-run "$name"
+}
+
+cmd_validate() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) echo "ERROR: unknown flag: $1" >&2; return 1 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: name is required" >&2; return 1; fi
+
+  local spec_file="$DATA_DIR/${name}.json"
+  local ok=true
+
+  # 1. Check spec file exists
+  echo "Checking spec file: $spec_file"
+  if [[ ! -f "$spec_file" ]]; then
+    echo "  FAIL: spec file does not exist" >&2
+    return 1
+  fi
+  echo "  OK: spec file exists"
+
+  # 2. Check it is valid JSON
+  if ! jq empty "$spec_file" 2>/dev/null; then
+    echo "  FAIL: spec file is not valid JSON" >&2
+    return 1
+  fi
+  echo "  OK: valid JSON"
+
+  # 3. Check required fields: name, query, script
+  local spec_name spec_query spec_script
+  spec_name=$(jq -r '.name // empty' "$spec_file")
+  spec_query=$(jq -r '.query // empty' "$spec_file")
+  spec_script=$(jq -r '.script // empty' "$spec_file")
+
+  if [[ -z "$spec_name" ]]; then
+    echo "  FAIL: missing required field 'name'" >&2
+    ok=false
+  else
+    echo "  OK: name = $spec_name"
+  fi
+
+  if [[ -z "$spec_query" ]]; then
+    echo "  FAIL: missing required field 'query'" >&2
+    ok=false
+  else
+    echo "  OK: query = $spec_query"
+  fi
+
+  if [[ -z "$spec_script" ]]; then
+    echo "  FAIL: missing required field 'script'" >&2
+    ok=false
+  else
+    echo "  OK: script = $spec_script"
+  fi
+
+  # 4. Validate the Sourcegraph query syntax via toolshed
+  if [[ -n "$spec_query" ]]; then
+    echo "Validating Sourcegraph query syntax ..."
+    if sourcegraph_validate_query "$spec_query"; then
+      echo "  OK: Sourcegraph query is valid"
+    else
+      ok=false
+    fi
+  fi
+
+  if [[ "$ok" == "true" ]]; then
+    echo ""
+    echo "Validation passed."
+  else
+    echo ""
+    echo "Validation failed." >&2
+    return 1
+  fi
+}
+
+cmd_repositories() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) echo "ERROR: unknown flag: $1" >&2; return 1 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: name is required" >&2; return 1; fi
+
+  local spec_file="$DATA_DIR/${name}.json"
+  if [[ ! -f "$spec_file" ]]; then
+    echo "ERROR: batch change '$name' not found at $spec_file" >&2
+    return 1
+  fi
+
+  local query
+  query=$(jq -r '.query' "$spec_file")
+
+  echo "Searching Sourcegraph for repos matching: $query"
+  local repos
+  repos=$(sourcegraph_search_repos "$query")
+
+  if [[ -z "$repos" ]]; then
+    echo "No repos matched the query."
+    return 0
+  fi
+
+  local repo_count
+  repo_count=$(echo "$repos" | wc -l | tr -d ' ')
+  echo "Found $repo_count repo(s):"
+  echo ""
+  echo "$repos" | while IFS= read -r repo; do
+    local repo_path
+    repo_path=$(parse_repo_path "$repo")
+    echo "  $repo_path"
+  done
+}
+
+cmd_status() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) echo "ERROR: unknown flag: $1" >&2; return 1 ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then echo "ERROR: name is required" >&2; return 1; fi
+
+  local results_file="$DATA_DIR/${name}-results.json"
+  if [[ ! -f "$results_file" ]]; then
+    echo "ERROR: no results found for batch change '$name'" >&2
+    echo "Has this batch change been run yet?" >&2
+    return 1
+  fi
+
+  load_gitlab_token
+
+  local entry_count
+  entry_count=$(jq 'length' "$results_file")
+  echo "Batch change: $name ($entry_count repos)"
+  echo "---"
+
+  local updated_results
+  updated_results=$(jq '.' "$results_file")
+
+  for i in $(seq 0 $((entry_count - 1))); do
+    local repo status mr_iid project_id
+    repo=$(jq -r ".[$i].repo" "$results_file")
+    status=$(jq -r ".[$i].status" "$results_file")
+    mr_iid=$(jq -r ".[$i].mr_iid // empty" "$results_file")
+    project_id=$(jq -r ".[$i].project_id // empty" "$results_file")
+
+    if [[ -n "$mr_iid" && -n "$project_id" ]]; then
+      local current_state
+      current_state=$(gitlab_mr_status "$project_id" "$mr_iid" 2>/dev/null || echo "unknown")
+      printf "  %-40s  MR !%-6s  %s\n" "$repo" "$mr_iid" "$current_state"
+      updated_results=$(echo "$updated_results" | jq --argjson i "$i" --arg s "$current_state" '.[$i].current_state = $s')
+    else
+      printf "  %-40s  %s\n" "$repo" "$status"
+    fi
+  done
+
+  echo "$updated_results" > "$results_file"
+}
+
+cmd_list() {
+  local specs
+  specs=$(find "$DATA_DIR" -maxdepth 1 -name '*.json' ! -name '*-results.json' -type f 2>/dev/null)
+
+  if [[ -z "$specs" ]]; then
+    echo "No batch changes found."
+    return 0
+  fi
+
+  echo "Batch changes:"
+  echo "---"
+  while IFS= read -r spec_file; do
+    local name created_at query
+    name=$(jq -r '.name' "$spec_file")
+    created_at=$(jq -r '.created_at' "$spec_file")
+    query=$(jq -r '.query' "$spec_file")
+    local has_results="no"
+    if [[ -f "$DATA_DIR/${name}-results.json" ]]; then
+      has_results="yes"
+    fi
+    printf "  %-25s  created: %s  executed: %s\n" "$name" "$created_at" "$has_results"
+    printf "    query: %s\n" "$query"
+  done <<< "$specs"
+}
+
+cmd_health() {
+  local ok=true
+
+  echo "Checking Sourcegraph connectivity (via toolshed) ..."
+  if ts_call "sourcegraph__health" "{}" >/dev/null 2>&1; then
+    echo "  Sourcegraph: OK (via $TOOLSHED_URL)"
+  else
+    echo "  Sourcegraph: FAILED (toolshed call to sourcegraph__health failed)"
+    ok=false
+  fi
+
+  echo "Checking GitLab connectivity ..."
+  if load_gitlab_token 2>/dev/null; then
+    local gl_status
+    gl_status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
+      -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+      "$GITLAB_URL/api/v4/version" 2>/dev/null || echo "000")
+    if [[ "$gl_status" == "200" ]]; then
+      echo "  GitLab: OK ($GITLAB_URL)"
+    else
+      echo "  GitLab: FAILED (HTTP $gl_status at $GITLAB_URL)"
+      ok=false
+    fi
+  else
+    echo "  GitLab: FAILED (could not load credentials from Vault)"
+    ok=false
+  fi
+
+  echo "Checking Vault connectivity ..."
+  local vault_status
+  vault_status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
+    "$VAULT_ADDR/v1/sys/health" 2>/dev/null || echo "000")
+  if [[ "$vault_status" == "200" ]]; then
+    echo "  Vault: OK ($VAULT_ADDR)"
+  else
+    echo "  Vault: FAILED (HTTP $vault_status at $VAULT_ADDR)"
+    ok=false
+  fi
+
+  if [[ "$ok" == "true" ]]; then
+    echo ""
+    echo "All services healthy."
+  else
+    echo ""
+    echo "Some services are unhealthy." >&2
+    return 1
+  fi
+}
+
+# ===========================================================================
+# Dispatch
+# ===========================================================================
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+  new)          cmd_new "$@" ;;
+  apply)        cmd_apply "$@" ;;
+  preview)      cmd_preview "$@" ;;
+  validate)     cmd_validate "$@" ;;
+  repositories) cmd_repositories "$@" ;;
+  status)       cmd_status "$@" ;;
+  list)         cmd_list "$@" ;;
+  health)       cmd_health "$@" ;;
+  *)
+    echo "Usage: batch-changes <command> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  new          Create a new batch change spec"
+    echo "  apply        Execute a batch change (clone, script, push, open MRs)"
+    echo "  preview      Dry-run a batch change (show what apply would do)"
+    echo "  validate     Validate a batch change spec"
+    echo "  repositories List repos that would be affected"
+    echo "  status       Show status of a batch change"
+    echo "  list         List all batch changes"
+    echo "  health       Check service connectivity"
+    exit 1
+    ;;
+esac

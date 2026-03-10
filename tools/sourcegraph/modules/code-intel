@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# code-intel — code navigation commands that route to narsil/lsp via toolshed
+#
+# Bridges the gap between the official SG MCP tool names and the underlying
+# narsil/lsp toolshed tools, so agents see a unified sourcegraph interface.
+###############################################################################
+
+TOOLSHED_URL="${TOOLSHED_URL:-http://127.0.0.1:8081}"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+ts_call() {
+    local tool_name="$1"
+    local args_json="$2"
+    local response
+    response=$(curl -sf --max-time 60 \
+        -X POST "$TOOLSHED_URL" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -n \
+            --arg name "$tool_name" \
+            --argjson args "$args_json" \
+            '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:$name,arguments:$args}}'
+        )")
+
+    local is_error
+    is_error=$(echo "$response" | jq -r '.result.isError // false')
+    if [[ "$is_error" == "true" ]]; then
+        echo "$response" | jq -r '.result.content[0].text // "unknown error"' >&2
+        return 1
+    fi
+
+    echo "$response" | jq -r '.result.content[0].text // empty'
+}
+
+###############################################################################
+# go_to_definition
+###############################################################################
+cmd_go_to_definition() {
+    local repo="" path="" symbol="" revision=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --path)     path="$2";     shift 2 ;;
+            --symbol)   symbol="$2";   shift 2 ;;
+            --revision) revision="$2"; shift 2 ;;
+            -*)         die "unknown flag: $1" ;;
+            *)          repo="$1";     shift ;;
+        esac
+    done
+
+    [[ -z "$repo" ]]   && die "repo is required"
+    [[ -z "$path" ]]   && die "--path is required"
+    [[ -z "$symbol" ]] && die "--symbol is required"
+
+    # Try LSP first (compiler-accurate), fall back to narsil (AST-based)
+    local result
+    result=$(ts_call "lsp__find_definition" "$(jq -n \
+        --arg file_path "$path" \
+        --arg symbol_name "$symbol" \
+        '{file_path: $file_path, symbol_name: $symbol_name}'
+    )" 2>/dev/null) || true
+
+    if [[ -n "$result" && "$result" != *"No symbols found"* && "$result" != *"not properly configured"* ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    # Fall back to narsil
+    local narsil_repo
+    narsil_repo=$(echo "$repo" | sed 's|.*/||')
+    result=$(ts_call "narsil__go_to_definition" "$(jq -n \
+        --arg repo "$narsil_repo" \
+        --arg file "$path" \
+        --arg symbol "$symbol" \
+        '{repo: $repo, file: $file, symbol: $symbol}'
+    )" 2>/dev/null) || true
+
+    if [[ -n "$result" ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    die "definition not found for $symbol in $repo:$path"
+}
+
+###############################################################################
+# find_references
+###############################################################################
+cmd_find_references() {
+    local repo="" path="" symbol="" revision=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --path)     path="$2";     shift 2 ;;
+            --symbol)   symbol="$2";   shift 2 ;;
+            --revision) revision="$2"; shift 2 ;;
+            -*)         die "unknown flag: $1" ;;
+            *)          repo="$1";     shift ;;
+        esac
+    done
+
+    [[ -z "$repo" ]]   && die "repo is required"
+    [[ -z "$path" ]]   && die "--path is required"
+    [[ -z "$symbol" ]] && die "--symbol is required"
+
+    # Try LSP first, fall back to narsil
+    local result
+    result=$(ts_call "lsp__find_references" "$(jq -n \
+        --arg file_path "$path" \
+        --arg symbol_name "$symbol" \
+        '{file_path: $file_path, symbol_name: $symbol_name}'
+    )" 2>/dev/null) || true
+
+    if [[ -n "$result" && "$result" != *"No symbols found"* && "$result" != *"not properly configured"* ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    # Fall back to narsil
+    local narsil_repo
+    narsil_repo=$(echo "$repo" | sed 's|.*/||')
+    result=$(ts_call "narsil__find_references" "$(jq -n \
+        --arg repo "$narsil_repo" \
+        --arg symbol "$symbol" \
+        '{repo: $repo, symbol: $symbol}'
+    )" 2>/dev/null) || true
+
+    if [[ -n "$result" ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    die "no references found for $symbol in $repo:$path"
+}
+
+###############################################################################
+# nls_search (natural language search — routes to narsil hybrid search)
+###############################################################################
+cmd_nls_search() {
+    local query="" repo="" count="10"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo)  repo="$2";  shift 2 ;;
+            --count) count="$2"; shift 2 ;;
+            -*)      die "unknown flag: $1" ;;
+            *)       query="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$query" ]] && die "query is required"
+
+    local args_json
+    if [[ -n "$repo" ]]; then
+        local narsil_repo
+        narsil_repo=$(echo "$repo" | sed 's|.*/||')
+        args_json=$(jq -n \
+            --arg query "$query" \
+            --arg repo "$narsil_repo" \
+            --argjson limit "$count" \
+            '{query: $query, repo: $repo, limit: $limit}')
+    else
+        args_json=$(jq -n \
+            --arg query "$query" \
+            --argjson limit "$count" \
+            '{query: $query, limit: $limit}')
+    fi
+
+    local result
+    result=$(ts_call "narsil__hybrid_search" "$args_json") || die "search failed"
+
+    echo "$result"
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    go_to_definition) cmd_go_to_definition "$@" ;;
+    find_references)  cmd_find_references "$@" ;;
+    nls_search)       cmd_nls_search "$@" ;;
+    *)
+        echo "Usage: code-intel <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  go_to_definition   Find the definition of a symbol"
+        echo "  find_references    Find all references to a symbol"
+        echo "  nls_search         Natural language semantic search"
+        exit 1
+        ;;
+esac

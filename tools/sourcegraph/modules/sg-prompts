@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# sg-prompts — Sourcegraph Prompt Library management
+###############################################################################
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
+SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
+unset _vault_data
+
+graphql() {
+    curl -sf -H "Authorization: token $SG_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -X POST "$SG_URL/.api/graphql" \
+        -d "$1"
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+###############################################################################
+# COMMANDS
+###############################################################################
+
+cmd_list() {
+    local query="" owner="" first="25" after="" orderBy="PROMPT_UPDATED_AT"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --query)   query="$2";   shift 2 ;;
+            --owner)   owner="$2";   shift 2 ;;
+            --first)   first="$2";   shift 2 ;;
+            --after)   after="$2";   shift 2 ;;
+            --orderBy) orderBy="$2"; shift 2 ;;
+            -*)        die "unknown flag: $1" ;;
+            *)         die "unexpected argument: $1" ;;
+        esac
+    done
+
+    local vars
+    vars=$(jq -n \
+        --arg query "$query" \
+        --argjson first "$first" \
+        --arg after "$after" \
+        --arg orderBy "$orderBy" \
+        --arg owner "$owner" \
+        '{
+            query: (if $query != "" then $query else null end),
+            first: $first,
+            after: (if $after != "" then $after else null end),
+            orderBy: $orderBy,
+            owner: (if $owner != "" then $owner else null end)
+        }')
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --argjson vars "$vars" \
+        '{
+            query: "query ListPrompts($query: String, $first: Int!, $after: String, $orderBy: PromptsOrderBy!, $owner: ID) { prompts(query: $query, first: $first, after: $after, orderBy: $orderBy, owner: $owner) { nodes { id name description owner { namespaceName } visibility draft createdAt updatedAt } totalCount pageInfo { hasNextPage endCursor } } }",
+            variables: $vars
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.prompts.totalCount // 0')
+    echo "Prompts (showing up to $first of $total):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.prompts.nodes[]? |
+        "\(.name)  [\(.visibility)\(if .draft then ", DRAFT" else "" end)]",
+        "  Owner: \(.owner.namespaceName // "unknown")",
+        "  ID: \(.id)",
+        "  \(.description // "(no description)")",
+        ""
+    '
+
+    local has_next
+    has_next=$(echo "$result" | jq -r '.data.prompts.pageInfo.hasNextPage // false')
+    if [[ "$has_next" == "true" ]]; then
+        local cursor
+        cursor=$(echo "$result" | jq -r '.data.prompts.pageInfo.endCursor')
+        echo "More results available. Use --after '$cursor' to paginate."
+    fi
+}
+
+cmd_get() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "query GetPrompt($id: ID!) { node(id: $id) { ... on Prompt { id name description definitionText owner { namespaceName } visibility draft createdAt updatedAt } } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local name
+    name=$(echo "$result" | jq -r '.data.node.name // empty')
+    if [[ -z "$name" ]]; then
+        die "prompt not found: $id"
+    fi
+
+    echo "$result" | jq -r '
+        .data.node |
+        "Name: \(.name)",
+        "ID: \(.id)",
+        "Owner: \(.owner.namespaceName // "unknown")",
+        "Visibility: \(.visibility)",
+        "Draft: \(.draft)",
+        "Created: \(.createdAt)",
+        "Updated: \(.updatedAt)",
+        "Description: \(.description // "(none)")",
+        "",
+        "--- Definition ---",
+        .definitionText
+    '
+}
+
+cmd_create() {
+    local name="" description="" definitionText="" owner="" visibility="SECRET" draft="false"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)           name="$2";           shift 2 ;;
+            --description)    description="$2";    shift 2 ;;
+            --definitionText) definitionText="$2"; shift 2 ;;
+            --owner)          owner="$2";          shift 2 ;;
+            --visibility)     visibility="$2";     shift 2 ;;
+            --draft)          draft="$2";          shift 2 ;;
+            -*)               die "unknown flag: $1" ;;
+            *)                die "unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -z "$name" ]]           && die "--name is required"
+    [[ -z "$definitionText" ]] && die "--definitionText is required"
+    [[ -z "$owner" ]]          && die "--owner is required"
+
+    local draft_bool="false"
+    [[ "$draft" == "true" ]] && draft_bool="true"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg name "$name" \
+        --arg desc "$description" \
+        --arg def "$definitionText" \
+        --arg owner "$owner" \
+        --arg vis "$visibility" \
+        --argjson draft "$draft_bool" \
+        '{
+            query: "mutation CreatePrompt($input: PromptInput!) { createPrompt(input: $input) { id name } }",
+            variables: {
+                input: {
+                    name: $name,
+                    description: $desc,
+                    definitionText: $def,
+                    owner: $owner,
+                    visibility: $vis,
+                    draft: $draft
+                }
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local new_id
+    new_id=$(echo "$result" | jq -r '.data.createPrompt.id // empty')
+    if [[ -z "$new_id" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to create prompt: ${errors:-unknown error}"
+    fi
+
+    echo "Created prompt: $name"
+    echo "ID: $new_id"
+}
+
+cmd_update() {
+    local id="" name="" description="" definitionText="" visibility="" draft=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)           name="$2";           shift 2 ;;
+            --description)    description="$2";    shift 2 ;;
+            --definitionText) definitionText="$2"; shift 2 ;;
+            --visibility)     visibility="$2";     shift 2 ;;
+            --draft)          draft="$2";          shift 2 ;;
+            -*)               die "unknown flag: $1" ;;
+            *)                id="$1";             shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    # Build input object with only provided fields
+    local input="{}"
+    [[ -n "$name" ]]           && input=$(echo "$input" | jq --arg v "$name" '. + {name: $v}')
+    [[ -n "$description" ]]    && input=$(echo "$input" | jq --arg v "$description" '. + {description: $v}')
+    [[ -n "$definitionText" ]] && input=$(echo "$input" | jq --arg v "$definitionText" '. + {definitionText: $v}')
+    [[ -n "$visibility" ]]     && input=$(echo "$input" | jq --arg v "$visibility" '. + {visibility: $v}')
+    [[ -n "$draft" ]]          && input=$(echo "$input" | jq --argjson v "$([ "$draft" = "true" ] && echo true || echo false)" '. + {draft: $v}')
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        --argjson input "$input" \
+        '{
+            query: "mutation UpdatePrompt($id: ID!, $input: PromptUpdateInput!) { updatePrompt(id: $id, input: $input) { id name } }",
+            variables: { id: $id, input: $input }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local updated_name
+    updated_name=$(echo "$result" | jq -r '.data.updatePrompt.name // empty')
+    if [[ -z "$updated_name" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to update prompt: ${errors:-unknown error}"
+    fi
+
+    echo "Updated prompt: $updated_name (ID: $id)"
+}
+
+cmd_delete() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "mutation DeletePrompt($id: ID!) { deletePrompt(id: $id) { alwaysNil } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to delete prompt: $errors"
+    fi
+
+    echo "Deleted prompt: $id"
+}
+
+cmd_transfer_ownership() {
+    local id="" newOwner=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --newOwner) newOwner="$2"; shift 2 ;;
+            -*)         die "unknown flag: $1" ;;
+            *)          id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]]       && die "id is required"
+    [[ -z "$newOwner" ]] && die "--newOwner is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        --arg newOwner "$newOwner" \
+        '{
+            query: "mutation TransferPromptOwnership($id: ID!, $newOwner: ID!) { transferPromptOwnership(id: $id, newOwner: $newOwner) { id name owner { namespaceName } } }",
+            variables: { id: $id, newOwner: $newOwner }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local new_owner_name
+    new_owner_name=$(echo "$result" | jq -r '.data.transferPromptOwnership.owner.namespaceName // empty')
+    if [[ -z "$new_owner_name" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to transfer ownership: ${errors:-unknown error}"
+    fi
+
+    echo "Transferred prompt $id to: $new_owner_name"
+}
+
+cmd_health() {
+    local ok=true
+
+    echo "Checking Sourcegraph Prompt Library access ..."
+
+    if [[ -z "$SG_URL" || "$SG_URL" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph URL from Vault"
+        ok=false
+    elif [[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph token from Vault"
+        ok=false
+    else
+        local result
+        result=$(graphql '{"query":"{ prompts(first: 1) { totalCount } }"}' 2>/dev/null || echo '{}')
+        local count
+        count=$(echo "$result" | jq -r '.data.prompts.totalCount // empty')
+        if [[ -n "$count" ]]; then
+            echo "  Prompt Library: OK ($count total prompts)"
+        else
+            echo "  Prompt Library: FAILED (API not accessible)"
+            ok=false
+        fi
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        echo "All services healthy."
+    else
+        echo "Some services are unhealthy." >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    list)                cmd_list "$@" ;;
+    get)                 cmd_get "$@" ;;
+    create)              cmd_create "$@" ;;
+    update)              cmd_update "$@" ;;
+    delete)              cmd_delete "$@" ;;
+    transfer_ownership)  cmd_transfer_ownership "$@" ;;
+    health)              cmd_health "$@" ;;
+    *)
+        echo "Usage: sg-prompts <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  list                 List/search prompts"
+        echo "  get                  Get prompt by ID"
+        echo "  create               Create a new prompt"
+        echo "  update               Update a prompt"
+        echo "  delete               Delete a prompt"
+        echo "  transfer_ownership   Transfer prompt to new owner"
+        echo "  health               Check service connectivity"
+        exit 1
+        ;;
+esac

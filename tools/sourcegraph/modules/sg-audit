@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# sg-audit — Sourcegraph event logs and operational monitoring
+###############################################################################
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
+SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
+unset _vault_data
+
+graphql() {
+    curl -sf -H "Authorization: token $SG_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -X POST "$SG_URL/.api/graphql" \
+        -d "$1"
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+###############################################################################
+# COMMANDS
+###############################################################################
+
+cmd_user_events() {
+    local username="" eventName="" first="50" after=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --eventName) eventName="$2"; shift 2 ;;
+            --first)     first="$2";     shift 2 ;;
+            --after)     after="$2";     shift 2 ;;
+            -*)          die "unknown flag: $1" ;;
+            *)           username="$1";  shift ;;
+        esac
+    done
+
+    [[ -z "$username" ]] && die "username is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg username "$username" \
+        --argjson first "$first" \
+        --arg after "$after" \
+        --arg eventName "$eventName" \
+        '{
+            query: "query UserEvents($username: String!, $first: Int!, $after: String, $eventName: String) { user(username: $username) { username eventLogs(first: $first, after: $after, eventName: $eventName) { totalCount nodes { name timestamp source argument url version } pageInfo { hasNextPage endCursor } } } }",
+            variables: {
+                username: $username,
+                first: $first,
+                after: (if $after != "" then $after else null end),
+                eventName: (if $eventName != "" then $eventName else null end)
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local uname
+    uname=$(echo "$result" | jq -r '.data.user.username // empty')
+    if [[ -z "$uname" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "user not found or access denied: $username (${errors:-})"
+    fi
+
+    local total
+    total=$(echo "$result" | jq -r '.data.user.eventLogs.totalCount // 0')
+    echo "Event logs for $username ($total total, showing up to $first):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.user.eventLogs.nodes[]? |
+        "\(.timestamp)  \(.name)",
+        "  Source: \(.source // "unknown")",
+        "  URL: \(.url // "N/A")",
+        (if .argument and .argument != "null" and .argument != "{}" then
+            "  Args: \(.argument)"
+        else empty end),
+        ""
+    '
+
+    local has_next
+    has_next=$(echo "$result" | jq -r '.data.user.eventLogs.pageInfo.hasNextPage // false')
+    if [[ "$has_next" == "true" ]]; then
+        local cursor
+        cursor=$(echo "$result" | jq -r '.data.user.eventLogs.pageInfo.endCursor')
+        echo "More results available. Use --after '$cursor' to paginate."
+    fi
+}
+
+cmd_all_user_events() {
+    local eventName="" maxUsers="50" eventsPerUser="10"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --eventName)     eventName="$2";     shift 2 ;;
+            --maxUsers)      maxUsers="$2";      shift 2 ;;
+            --eventsPerUser) eventsPerUser="$2"; shift 2 ;;
+            -*)              die "unknown flag: $1" ;;
+            *)               die "unexpected argument: $1" ;;
+        esac
+    done
+
+    # First get user list
+    local users_payload
+    users_payload=$(jq -n \
+        --argjson first "$maxUsers" \
+        '{
+            query: "query { users(first: $first) { nodes { username } } }",
+            variables: { first: $first }
+        }')
+
+    # Inline the variable since SG may not support $first in the query string
+    users_payload=$(jq -n \
+        --argjson maxUsers "$maxUsers" \
+        '{
+            query: ("query { users(first: " + ($maxUsers | tostring) + ") { nodes { username } } }")
+        }')
+
+    local users_result
+    users_result=$(graphql "$users_payload")
+
+    local usernames
+    usernames=$(echo "$users_result" | jq -r '.data.users.nodes[]?.username // empty')
+
+    if [[ -z "$usernames" ]]; then
+        die "could not list users (site admin may be required)"
+    fi
+
+    local total_events=0
+    echo "Aggregated event logs across users:"
+    echo "---"
+
+    while IFS= read -r uname; do
+        [[ -z "$uname" ]] && continue
+
+        local gql_payload
+        gql_payload=$(jq -n \
+            --arg username "$uname" \
+            --argjson first "$eventsPerUser" \
+            --arg eventName "$eventName" \
+            '{
+                query: "query UserEvents($username: String!, $first: Int!, $eventName: String) { user(username: $username) { eventLogs(first: $first, eventName: $eventName) { totalCount nodes { name timestamp source url } } } }",
+                variables: {
+                    username: $username,
+                    first: $first,
+                    eventName: (if $eventName != "" then $eventName else null end)
+                }
+            }')
+
+        local result
+        result=$(graphql "$gql_payload" 2>/dev/null || echo '{}')
+
+        local user_total
+        user_total=$(echo "$result" | jq -r '.data.user.eventLogs.totalCount // 0')
+        total_events=$((total_events + user_total))
+
+        local has_events
+        has_events=$(echo "$result" | jq -r '.data.user.eventLogs.nodes | length // 0')
+
+        if [[ "$has_events" -gt 0 ]]; then
+            echo "[$uname] ($user_total total events)"
+            echo "$result" | jq -r '
+                .data.user.eventLogs.nodes[]? |
+                "  \(.timestamp)  \(.name)  (\(.source // "unknown"))"
+            '
+            echo ""
+        fi
+    done <<< "$usernames"
+
+    echo "---"
+    echo "Total events across all queried users: $total_events"
+}
+
+cmd_outbound_requests() {
+    local first="50" after=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --first) first="$2"; shift 2 ;;
+            --after) after="$2"; shift 2 ;;
+            -*)      die "unknown flag: $1" ;;
+            *)       die "unexpected argument: $1" ;;
+        esac
+    done
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --argjson first "$first" \
+        --arg after "$after" \
+        '{
+            query: "query OutboundRequests($first: Int!, $after: String) { outboundRequests(first: $first, after: $after) { nodes { id startedAt method url requestHeaders { name values } requestBody statusCode responseHeaders { name values } durationMs creationStackFrame callStack errorMessage } totalCount pageInfo { hasNextPage endCursor } } }",
+            variables: {
+                first: $first,
+                after: (if $after != "" then $after else null end)
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.outboundRequests.totalCount // 0')
+    echo "Outbound requests ($total total, showing up to $first):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.outboundRequests.nodes[]? |
+        "\(.startedAt)  \(.method) \(.url)  [\(.statusCode // "?"), \(.durationMs // "?")ms]",
+        (if .errorMessage then "  ERROR: \(.errorMessage)" else empty end),
+        ""
+    '
+
+    local has_next
+    has_next=$(echo "$result" | jq -r '.data.outboundRequests.pageInfo.hasNextPage // false')
+    if [[ "$has_next" == "true" ]]; then
+        local cursor
+        cursor=$(echo "$result" | jq -r '.data.outboundRequests.pageInfo.endCursor')
+        echo "More results available. Use --after '$cursor' to paginate."
+    fi
+}
+
+cmd_slow_requests() {
+    local after=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --after) after="$2"; shift 2 ;;
+            -*)      die "unknown flag: $1" ;;
+            *)       die "unexpected argument: $1" ;;
+        esac
+    done
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg after "$after" \
+        '{
+            query: "query SlowRequests($after: String) { slowRequests(after: $after) { nodes { index start duration name source variables errors filepath user { username } query } } }",
+            variables: {
+                after: (if $after != "" then $after else null end)
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local count
+    count=$(echo "$result" | jq '.data.slowRequests.nodes | length // 0')
+    echo "Slow GraphQL requests ($count captured):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.slowRequests.nodes[]? |
+        "\(.start)  \(.name // "unnamed")  [\(.duration)]",
+        "  User: \(.user.username // "anonymous")",
+        "  Source: \(.source // "unknown")",
+        (if .errors and (.errors | length) > 0 then "  Errors: \(.errors | join("; "))" else empty end),
+        ""
+    '
+}
+
+cmd_health() {
+    local ok=true
+
+    echo "Checking Sourcegraph event log access ..."
+
+    if [[ -z "$SG_URL" || "$SG_URL" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph URL from Vault"
+        ok=false
+    elif [[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph token from Vault"
+        ok=false
+    else
+        # Check current user event logs
+        local result
+        result=$(graphql '{"query":"{ currentUser { username eventLogs(first: 1) { totalCount } } }"}' 2>/dev/null || echo '{}')
+        local username
+        username=$(echo "$result" | jq -r '.data.currentUser.username // empty')
+        local count
+        count=$(echo "$result" | jq -r '.data.currentUser.eventLogs.totalCount // empty')
+
+        if [[ -n "$username" && -n "$count" ]]; then
+            echo "  Event Logs: OK (user: $username, $count events)"
+        else
+            echo "  Event Logs: FAILED (API not accessible)"
+            ok=false
+        fi
+
+        # Check outbound requests (admin-only)
+        local ob_result
+        ob_result=$(graphql '{"query":"{ outboundRequests(first: 1) { totalCount } }"}' 2>/dev/null || echo '{}')
+        local ob_count
+        ob_count=$(echo "$ob_result" | jq -r '.data.outboundRequests.totalCount // empty')
+        if [[ -n "$ob_count" ]]; then
+            echo "  Outbound Requests: OK ($ob_count logged)"
+        else
+            echo "  Outbound Requests: FAILED (site admin may be required)"
+        fi
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        echo "All services healthy."
+    else
+        echo "Some services are unhealthy." >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    user_events)        cmd_user_events "$@" ;;
+    all_user_events)    cmd_all_user_events "$@" ;;
+    outbound_requests)  cmd_outbound_requests "$@" ;;
+    slow_requests)      cmd_slow_requests "$@" ;;
+    health)             cmd_health "$@" ;;
+    *)
+        echo "Usage: sg-audit <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  user_events         List events for a specific user"
+        echo "  all_user_events     Aggregate events across all users (admin)"
+        echo "  outbound_requests   List outbound HTTP requests (admin)"
+        echo "  slow_requests       List slow GraphQL requests (admin)"
+        echo "  health              Check service connectivity"
+        exit 1
+        ;;
+esac

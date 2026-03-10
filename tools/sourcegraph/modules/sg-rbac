@@ -1,0 +1,470 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# sg-rbac — Sourcegraph RBAC management (ADMIN)
+###############################################################################
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
+SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
+unset _vault_data
+
+graphql() {
+    curl -sf -H "Authorization: token $SG_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -X POST "$SG_URL/.api/graphql" \
+        -d "$1"
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+check_admin() {
+    local result
+    result=$(graphql '{"query":"{ currentUser { siteAdmin } }"}')
+    local is_admin
+    is_admin=$(echo "$result" | jq -r '.data.currentUser.siteAdmin // false')
+    [[ "$is_admin" != "true" ]] && die "this command requires site admin privileges"
+}
+
+###############################################################################
+# COMMANDS
+###############################################################################
+
+cmd_list_roles() {
+    local gql_payload='{"query":"{ roles { nodes { id name system createdAt permissions { nodes { id displayName } } } totalCount } }"}'
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.roles.totalCount // 0')
+    echo "Roles ($total total):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.roles.nodes[]? |
+        "\(.name)\(if .system then " [SYSTEM]" else "" end)",
+        "  ID: \(.id)",
+        "  Permissions: \([.permissions.nodes[]?.displayName] | join(", "))",
+        "  Created: \(.createdAt)",
+        ""
+    '
+}
+
+cmd_get_role() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "query GetRole($id: ID!) { node(id: $id) { ... on Role { id name system createdAt permissions { nodes { id displayName action } } } } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local name
+    name=$(echo "$result" | jq -r '.data.node.name // empty')
+    if [[ -z "$name" ]]; then
+        die "role not found: $id"
+    fi
+
+    echo "$result" | jq -r '
+        .data.node |
+        "Name: \(.name)",
+        "ID: \(.id)",
+        "System: \(.system)",
+        "Created: \(.createdAt)",
+        "",
+        "Permissions:",
+        (.permissions.nodes[]? | "  \(.displayName) (\(.action))")
+    '
+}
+
+cmd_create_role() {
+    local name="" permissions=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)        name="$2";        shift 2 ;;
+            --permissions) permissions="$2"; shift 2 ;;
+            -*)            die "unknown flag: $1" ;;
+            *)             die "unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -z "$name" ]] && die "--name is required"
+
+    check_admin
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg name "$name" \
+        '{
+            query: "mutation CreateRole($name: String!) { createRole(name: $name) { id name } }",
+            variables: { name: $name }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local new_id
+    new_id=$(echo "$result" | jq -r '.data.createRole.id // empty')
+    if [[ -z "$new_id" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to create role: ${errors:-unknown error}"
+    fi
+
+    echo "Created role: $name"
+    echo "ID: $new_id"
+
+    # Assign permissions if provided
+    if [[ -n "$permissions" ]]; then
+        IFS=',' read -ra perm_ids <<< "$permissions"
+        for pid in "${perm_ids[@]}"; do
+            pid=$(echo "$pid" | xargs) # trim whitespace
+            local perm_payload
+            perm_payload=$(jq -n \
+                --arg roleId "$new_id" \
+                --arg permId "$pid" \
+                '{
+                    query: "mutation SetPermission($roleId: ID!, $permId: ID!) { setRolePermissions(role: $roleId, permissions: [$permId]) { alwaysNil } }",
+                    variables: { roleId: $roleId, permId: $permId }
+                }')
+            graphql "$perm_payload" > /dev/null 2>&1
+            echo "  Assigned permission: $pid"
+        done
+    fi
+}
+
+cmd_delete_role() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    check_admin
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "mutation DeleteRole($id: ID!) { deleteRole(role: $id) }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to delete role: $errors"
+    fi
+
+    echo "Deleted role: $id"
+}
+
+cmd_assign_role() {
+    local username="" roleId=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --username) username="$2"; shift 2 ;;
+            --roleId)   roleId="$2";   shift 2 ;;
+            -*)         die "unknown flag: $1" ;;
+            *)          die "unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -z "$username" ]] && die "--username is required"
+    [[ -z "$roleId" ]]   && die "--roleId is required"
+
+    check_admin
+
+    # Resolve username to ID
+    local user_result
+    user_result=$(graphql "$(jq -n '{query: "query { user(username: \"'$username'\") { id } }"}')")
+    local user_id
+    user_id=$(echo "$user_result" | jq -r '.data.user.id // empty')
+    [[ -z "$user_id" ]] && die "user not found: $username"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg userId "$user_id" \
+        --arg roleId "$roleId" \
+        '{
+            query: "mutation AssignRole($userId: ID!, $roleId: ID!) { setRoles(user: $userId, roles: [$roleId]) { alwaysNil } }",
+            variables: { userId: $userId, roleId: $roleId }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to assign role: $errors"
+    fi
+
+    echo "Assigned role $roleId to user $username"
+}
+
+cmd_revoke_role() {
+    local username="" roleId=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --username) username="$2"; shift 2 ;;
+            --roleId)   roleId="$2";   shift 2 ;;
+            -*)         die "unknown flag: $1" ;;
+            *)          die "unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -z "$username" ]] && die "--username is required"
+    [[ -z "$roleId" ]]   && die "--roleId is required"
+
+    check_admin
+
+    # Resolve username to ID, get current roles, remove the specified one
+    local user_result
+    user_result=$(graphql "$(jq -n '{query: "query { user(username: \"'$username'\") { id roles { nodes { id } } } }"}')")
+    local user_id
+    user_id=$(echo "$user_result" | jq -r '.data.user.id // empty')
+    [[ -z "$user_id" ]] && die "user not found: $username"
+
+    # Get current roles minus the one to revoke
+    local remaining_roles
+    remaining_roles=$(echo "$user_result" | jq -r --arg rid "$roleId" '[.data.user.roles.nodes[]? | select(.id != $rid) | .id]')
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg userId "$user_id" \
+        --argjson roles "$remaining_roles" \
+        '{
+            query: "mutation SetRoles($userId: ID!, $roles: [ID!]!) { setRoles(user: $userId, roles: $roles) { alwaysNil } }",
+            variables: { userId: $userId, roles: $roles }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to revoke role: $errors"
+    fi
+
+    echo "Revoked role $roleId from user $username"
+}
+
+cmd_list_permissions() {
+    local gql_payload='{"query":"{ permissions { nodes { id displayName action namespace createdAt } totalCount } }"}'
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.permissions.totalCount // 0')
+    echo "Available permissions ($total total):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.permissions.nodes[]? |
+        "\(.displayName)",
+        "  ID: \(.id)",
+        "  Action: \(.action)",
+        "  Namespace: \(.namespace // "global")",
+        ""
+    '
+}
+
+cmd_get_repo_permissions() {
+    local repo=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   repo="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$repo" ]] && die "repo is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg repo "$repo" \
+        '{
+            query: "query RepoPerms($repo: String!) { repository(name: $repo) { name permissionsInfo { syncedAt updatedAt permissions unrestricted } } }",
+            variables: { repo: $repo }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local name
+    name=$(echo "$result" | jq -r '.data.repository.name // empty')
+    if [[ -z "$name" ]]; then
+        die "repository not found: $repo"
+    fi
+
+    echo "$result" | jq -r '
+        .data.repository |
+        "Repository: \(.name)",
+        "Permissions:",
+        "  Synced at: \(.permissionsInfo.syncedAt // "never")",
+        "  Updated at: \(.permissionsInfo.updatedAt // "never")",
+        "  Unrestricted: \(.permissionsInfo.unrestricted // false)",
+        "  Permissions: \(.permissionsInfo.permissions // [] | join(", "))"
+    '
+}
+
+cmd_sync_permissions() {
+    local username=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --username) username="$2"; shift 2 ;;
+            -*)         die "unknown flag: $1" ;;
+            *)          die "unexpected argument: $1" ;;
+        esac
+    done
+
+    check_admin
+
+    if [[ -n "$username" ]]; then
+        # Sync specific user
+        local user_result
+        user_result=$(graphql "$(jq -n '{query: "query { user(username: \"'$username'\") { id } }"}')")
+        local user_id
+        user_id=$(echo "$user_result" | jq -r '.data.user.id // empty')
+        [[ -z "$user_id" ]] && die "user not found: $username"
+
+        local gql_payload
+        gql_payload=$(jq -n \
+            --arg id "$user_id" \
+            '{
+                query: "mutation SyncUserPerms($id: ID!) { scheduleUserPermissionsSync(user: $id) }",
+                variables: { id: $id }
+            }')
+
+        graphql "$gql_payload" > /dev/null 2>&1
+        echo "Scheduled permissions sync for user: $username"
+    else
+        echo "ERROR: scheduleRepositoryPermissionsSync requires a specific repository ID." >&2
+        echo "Use --username to sync permissions for a specific user instead." >&2
+        return 1
+    fi
+}
+
+cmd_get_sync_status() {
+    local gql_payload='{"query":"{ permissionsSyncJobs(first: 5) { nodes { id state reason completedAt queuedAt startedAt } totalCount } }"}'
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.permissionsSyncJobs.totalCount // 0')
+    echo "Permissions sync jobs ($total total, showing latest 5):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.permissionsSyncJobs.nodes[]? |
+        "\(.state)  \(.reason // "manual")",
+        "  ID: \(.id)",
+        "  Queued: \(.queuedAt // "N/A")",
+        "  Started: \(.startedAt // "N/A")",
+        "  Completed: \(.completedAt // "N/A")",
+        ""
+    '
+}
+
+cmd_health() {
+    local ok=true
+
+    echo "Checking Sourcegraph RBAC access ..."
+
+    if [[ -z "$SG_URL" || "$SG_URL" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph URL from Vault"
+        ok=false
+    elif [[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph token from Vault"
+        ok=false
+    else
+        local result
+        result=$(graphql '{"query":"{ roles { totalCount } }"}' 2>/dev/null || echo '{}')
+        local count
+        count=$(echo "$result" | jq -r '.data.roles.totalCount // empty')
+        if [[ -n "$count" ]]; then
+            echo "  RBAC: OK ($count roles defined)"
+        else
+            echo "  RBAC: FAILED (API not accessible — may require site admin)"
+            ok=false
+        fi
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        echo "All services healthy."
+    else
+        echo "Some services are unhealthy." >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    list_roles)        cmd_list_roles "$@" ;;
+    get_role)          cmd_get_role "$@" ;;
+    create_role)       cmd_create_role "$@" ;;
+    delete_role)       cmd_delete_role "$@" ;;
+    assign_role)       cmd_assign_role "$@" ;;
+    revoke_role)       cmd_revoke_role "$@" ;;
+    list_permissions)  cmd_list_permissions "$@" ;;
+    get_repo_permissions) cmd_get_repo_permissions "$@" ;;
+    sync_permissions)  cmd_sync_permissions "$@" ;;
+    get_sync_status)   cmd_get_sync_status "$@" ;;
+    health)            cmd_health "$@" ;;
+    *)
+        echo "Usage: sg-rbac <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  list_roles           List all roles"
+        echo "  get_role             Get role details"
+        echo "  create_role          Create a role (admin)"
+        echo "  delete_role          Delete a role (admin)"
+        echo "  assign_role          Assign role to user (admin)"
+        echo "  revoke_role          Revoke role from user (admin)"
+        echo "  list_permissions     List available permissions"
+        echo "  get_repo_permissions Get repo permission info"
+        echo "  sync_permissions     Trigger permissions sync (admin)"
+        echo "  get_sync_status      Get sync job status"
+        echo "  health               Check connectivity"
+        exit 1
+        ;;
+esac

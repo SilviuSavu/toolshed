@@ -1,0 +1,449 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# sg-notebooks — Sourcegraph Notebooks management
+###############################################################################
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
+SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
+unset _vault_data
+
+graphql() {
+    curl -sf -H "Authorization: token $SG_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -X POST "$SG_URL/.api/graphql" \
+        -d "$1"
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+###############################################################################
+# COMMANDS
+###############################################################################
+
+cmd_list() {
+    local query="" creator="" starred="" first="25" after="" orderBy="NOTEBOOK_UPDATED_AT"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --query)   query="$2";   shift 2 ;;
+            --creator) creator="$2"; shift 2 ;;
+            --starred) starred="$2"; shift 2 ;;
+            --first)   first="$2";   shift 2 ;;
+            --after)   after="$2";   shift 2 ;;
+            --orderBy) orderBy="$2"; shift 2 ;;
+            -*)        die "unknown flag: $1" ;;
+            *)         die "unexpected argument: $1" ;;
+        esac
+    done
+
+    local vars
+    vars=$(jq -n \
+        --arg query "$query" \
+        --argjson first "$first" \
+        --arg after "$after" \
+        --arg orderBy "$orderBy" \
+        --arg creator "$creator" \
+        --arg starred "$starred" \
+        '{
+            query: (if $query != "" then $query else null end),
+            first: $first,
+            after: (if $after != "" then $after else null end),
+            orderBy: $orderBy,
+            creatorUserID: (if $creator != "" then $creator else null end),
+            starredByUserID: (if $starred == "true" then "current" else null end)
+        }')
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --argjson vars "$vars" \
+        '{
+            query: "query ListNotebooks($query: String, $first: Int!, $after: String, $orderBy: NotebooksOrderBy!, $creatorUserID: ID) { notebooks(query: $query, first: $first, after: $after, orderBy: $orderBy, creatorUserID: $creatorUserID) { nodes { id title public createdAt updatedAt creator { username } blocks { __typename ... on MarkdownBlock { id } ... on QueryBlock { id } ... on FileBlock { id } ... on SymbolBlock { id } } stars { totalCount } } totalCount pageInfo { hasNextPage endCursor } } }",
+            variables: $vars
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local total
+    total=$(echo "$result" | jq -r '.data.notebooks.totalCount // 0')
+    echo "Notebooks (showing up to $first of $total):"
+    echo "---"
+    echo "$result" | jq -r '
+        .data.notebooks.nodes[]? |
+        "\(.title)  [\(if .public then "PUBLIC" else "PRIVATE" end), \(.stars.totalCount // 0) stars, \(.blocks | length) blocks]",
+        "  Creator: \(.creator.username // "unknown")",
+        "  ID: \(.id)",
+        "  Updated: \(.updatedAt)",
+        ""
+    '
+
+    local has_next
+    has_next=$(echo "$result" | jq -r '.data.notebooks.pageInfo.hasNextPage // false')
+    if [[ "$has_next" == "true" ]]; then
+        local cursor
+        cursor=$(echo "$result" | jq -r '.data.notebooks.pageInfo.endCursor')
+        echo "More results available. Use --after '$cursor' to paginate."
+    fi
+}
+
+cmd_get() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "query GetNotebook($id: ID!) { node(id: $id) { ... on Notebook { id title public createdAt updatedAt creator { username } namespace { namespaceName } stars { totalCount } blocks { __typename ... on MarkdownBlock { id markdownInput } ... on QueryBlock { id queryInput } ... on FileBlock { id fileInput { repositoryName filePath revision lineRange { startLine endLine } } } ... on SymbolBlock { id symbolInput { repositoryName filePath revision symbolName symbolContainerName symbolKind } } } } } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local title
+    title=$(echo "$result" | jq -r '.data.node.title // empty')
+    if [[ -z "$title" ]]; then
+        die "notebook not found: $id"
+    fi
+
+    echo "$result" | jq -r '
+        .data.node |
+        "Title: \(.title)",
+        "ID: \(.id)",
+        "Creator: \(.creator.username // "unknown")",
+        "Namespace: \(.namespace.namespaceName // "unknown")",
+        "Public: \(.public)",
+        "Stars: \(.stars.totalCount // 0)",
+        "Created: \(.createdAt)",
+        "Updated: \(.updatedAt)",
+        "",
+        "--- Blocks (\(.blocks | length)) ---"
+    '
+
+    echo "$result" | jq -r '
+        .data.node.blocks[]? |
+        if .__typename == "MarkdownBlock" then
+            "[\(.__typename)]",
+            .markdownInput,
+            ""
+        elif .__typename == "QueryBlock" then
+            "[\(.__typename)] \(.queryInput)",
+            ""
+        elif .__typename == "FileBlock" then
+            "[\(.__typename)] \(.fileInput.repositoryName):\(.fileInput.filePath)@\(.fileInput.revision // "HEAD")",
+            ""
+        elif .__typename == "SymbolBlock" then
+            "[\(.__typename)] \(.symbolInput.symbolKind // "") \(.symbolInput.symbolName) in \(.symbolInput.repositoryName):\(.symbolInput.filePath)",
+            ""
+        else
+            "[\(.__typename)]",
+            ""
+        end
+    '
+}
+
+cmd_create() {
+    local title="" blocks="" namespace="" public="false"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title)     title="$2";     shift 2 ;;
+            --blocks)    blocks="$2";    shift 2 ;;
+            --namespace) namespace="$2"; shift 2 ;;
+            --public)    public="$2";    shift 2 ;;
+            -*)          die "unknown flag: $1" ;;
+            *)           die "unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -z "$title" ]]     && die "--title is required"
+    [[ -z "$blocks" ]]    && die "--blocks is required (JSON array)"
+    [[ -z "$namespace" ]] && die "--namespace is required"
+
+    local public_bool="false"
+    [[ "$public" == "true" ]] && public_bool="true"
+
+    # Validate blocks is valid JSON array
+    echo "$blocks" | jq empty 2>/dev/null || die "--blocks must be valid JSON"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg title "$title" \
+        --argjson blocks "$blocks" \
+        --arg ns "$namespace" \
+        --argjson public "$public_bool" \
+        '{
+            query: "mutation CreateNotebook($input: NotebookInput!) { createNotebook(notebook: $input) { id title } }",
+            variables: {
+                input: {
+                    title: $title,
+                    blocks: $blocks,
+                    namespace: $ns,
+                    public: $public
+                }
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local new_id
+    new_id=$(echo "$result" | jq -r '.data.createNotebook.id // empty')
+    if [[ -z "$new_id" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to create notebook: ${errors:-unknown error}"
+    fi
+
+    echo "Created notebook: $title"
+    echo "ID: $new_id"
+}
+
+cmd_update() {
+    local id="" title="" blocks="" public=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title)  title="$2";  shift 2 ;;
+            --blocks) blocks="$2"; shift 2 ;;
+            --public) public="$2"; shift 2 ;;
+            -*)       die "unknown flag: $1" ;;
+            *)        id="$1";     shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    # Build input — we need to fetch current state first to merge
+    local current
+    current=$(graphql "$(jq -n --arg id "$id" '{
+        query: "query { node(id: \"'$id'\") { ... on Notebook { title public blocks { __typename ... on MarkdownBlock { id markdownInput } ... on QueryBlock { id queryInput } ... on FileBlock { id fileInput { repositoryName filePath revision } } ... on SymbolBlock { id symbolInput { repositoryName filePath revision symbolName symbolContainerName symbolKind } } } namespace { id } } }"
+    }')")
+
+    local cur_title cur_public cur_ns
+    cur_title=$(echo "$current" | jq -r '.data.node.title // empty')
+    cur_public=$(echo "$current" | jq '.data.node.public // false')
+    cur_ns=$(echo "$current" | jq -r '.data.node.namespace.id // empty')
+
+    [[ -z "$cur_title" ]] && die "notebook not found: $id"
+
+    local use_title="${title:-$cur_title}"
+    local use_public="${public:-$cur_public}"
+    [[ "$use_public" == "true" ]] && use_public="true" || use_public="false"
+
+    local use_blocks
+    if [[ -n "$blocks" ]]; then
+        echo "$blocks" | jq empty 2>/dev/null || die "--blocks must be valid JSON"
+        use_blocks="$blocks"
+    else
+        use_blocks=$(echo "$current" | jq '[.data.node.blocks[]? | if .__typename == "MarkdownBlock" then {type: "MARKDOWN", markdownInput: .markdownInput} elif .__typename == "QueryBlock" then {type: "QUERY", queryInput: .queryInput} elif .__typename == "FileBlock" then {type: "FILE", fileInput: .fileInput} elif .__typename == "SymbolBlock" then {type: "SYMBOL", symbolInput: .symbolInput} else empty end]')
+    fi
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        --arg title "$use_title" \
+        --argjson blocks "$use_blocks" \
+        --arg ns "$cur_ns" \
+        --argjson public "$use_public" \
+        '{
+            query: "mutation UpdateNotebook($id: ID!, $input: NotebookInput!) { updateNotebook(id: $id, notebook: $input) { id title } }",
+            variables: {
+                id: $id,
+                input: {
+                    title: $title,
+                    blocks: $blocks,
+                    namespace: $ns,
+                    public: $public
+                }
+            }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local updated_title
+    updated_title=$(echo "$result" | jq -r '.data.updateNotebook.title // empty')
+    if [[ -z "$updated_title" ]]; then
+        local errors
+        errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+        die "failed to update notebook: ${errors:-unknown error}"
+    fi
+
+    echo "Updated notebook: $updated_title (ID: $id)"
+}
+
+cmd_delete() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "mutation DeleteNotebook($id: ID!) { deleteNotebook(id: $id) }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to delete notebook: $errors"
+    fi
+
+    echo "Deleted notebook: $id"
+}
+
+cmd_add_star() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "mutation AddNotebookStar($id: ID!) { createNotebookStar(notebookID: $id) { createdAt } }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to star notebook: $errors"
+    fi
+
+    echo "Starred notebook: $id"
+}
+
+cmd_remove_star() {
+    local id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)  die "unknown flag: $1" ;;
+            *)   id="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$id" ]] && die "id is required"
+
+    local gql_payload
+    gql_payload=$(jq -n \
+        --arg id "$id" \
+        '{
+            query: "mutation RemoveNotebookStar($id: ID!) { deleteNotebookStar(notebookID: $id) }",
+            variables: { id: $id }
+        }')
+
+    local result
+    result=$(graphql "$gql_payload")
+
+    local errors
+    errors=$(echo "$result" | jq -r '.errors[]?.message // empty' 2>/dev/null)
+    if [[ -n "$errors" ]]; then
+        die "failed to unstar notebook: $errors"
+    fi
+
+    echo "Unstarred notebook: $id"
+}
+
+cmd_health() {
+    local ok=true
+
+    echo "Checking Sourcegraph Notebook access ..."
+
+    if [[ -z "$SG_URL" || "$SG_URL" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph URL from Vault"
+        ok=false
+    elif [[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]]; then
+        echo "  FAILED: could not load Sourcegraph token from Vault"
+        ok=false
+    else
+        local result
+        result=$(graphql '{"query":"{ notebooks(first: 1) { totalCount } }"}' 2>/dev/null || echo '{}')
+        local count
+        count=$(echo "$result" | jq -r '.data.notebooks.totalCount // empty')
+        if [[ -n "$count" ]]; then
+            echo "  Notebooks: OK ($count total notebooks)"
+        else
+            echo "  Notebooks: FAILED (API not accessible)"
+            ok=false
+        fi
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        echo "All services healthy."
+    else
+        echo "Some services are unhealthy." >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# Dispatch
+###############################################################################
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    list)        cmd_list "$@" ;;
+    get)         cmd_get "$@" ;;
+    create)      cmd_create "$@" ;;
+    update)      cmd_update "$@" ;;
+    delete)      cmd_delete "$@" ;;
+    add_star)    cmd_add_star "$@" ;;
+    remove_star) cmd_remove_star "$@" ;;
+    health)      cmd_health "$@" ;;
+    *)
+        echo "Usage: sg-notebooks <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  list          List/search notebooks"
+        echo "  get           Get notebook by ID with all blocks"
+        echo "  create        Create a new notebook"
+        echo "  update        Update a notebook"
+        echo "  delete        Delete a notebook"
+        echo "  add_star      Star a notebook"
+        echo "  remove_star   Unstar a notebook"
+        echo "  health        Check service connectivity"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,12 @@
+{
+  "name": "narsil",
+  "description": "90-tool code analysis — call graphs, taint analysis, SBOM, dead code, 32 languages",
+  "category": "code-intelligence",
+  "type": "mcp",
+  "max_output": 16384,
+  "mcp": {
+    "transport": "stdio",
+    "command": "/Users/savusilviu/.toolshed/tools/narsil/run"
+  },
+  "health": "which narsil-mcp"
+}

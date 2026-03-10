@@ -1,0 +1,674 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# code-owners — Parse CODEOWNERS files and resolve ownership
+# ---------------------------------------------------------------------------
+
+TOOLSHED_URL="${TOOLSHED_URL:-http://localhost:8081}"
+
+DB_DIR="$HOME/.toolshed/data"
+DB="$DB_DIR/code-owners.db"
+
+CODEOWNERS_PATHS=("CODEOWNERS" ".github/CODEOWNERS" ".gitlab/CODEOWNERS" "docs/CODEOWNERS")
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+# Call a tool via the toolshed JSON-RPC endpoint.
+ts_call() {
+  local tool="$1"
+  local args_json="$2"
+  local response
+  response=$(curl -sf --max-time 30 -X POST "$TOOLSHED_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args_json}}")
+  local is_err
+  is_err=$(echo "$response" | jq -r '.result.isError // false')
+  if [[ "$is_err" == "true" ]]; then
+    echo "ERROR: $(echo "$response" | jq -r '.result.content[0].text')" >&2
+    return 1
+  fi
+  echo "$response" | jq -r '.result.content[0].text'
+}
+
+init_db() {
+  mkdir -p "$DB_DIR"
+  sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS repos (
+    name TEXT PRIMARY KEY,
+    codeowners_path TEXT,
+    last_synced TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_name TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    owners TEXT NOT NULL,
+    line_number INTEGER,
+    FOREIGN KEY (repo_name) REFERENCES repos(name)
+);
+SQL
+}
+
+# Read a file from a repo via toolshed -> sourcegraph
+sg_read_file() {
+  local repo="$1" path="$2"
+  local args_json
+  args_json=$(jq -n --arg r "$repo" --arg p "$path" '{"repo": $r, "path": $p}')
+  ts_call "sourcegraph__read_file" "$args_json"
+}
+
+# List files in a repo via toolshed -> sourcegraph
+# Note: sourcegraph__list_files returns formatted text, need to parse it
+sg_list_files() {
+  local repo="$1"
+  local args_json
+  args_json=$(jq -n --arg r "$repo" --arg fmt "raw" '{"repo": $r, "format": $fmt}')
+  local result
+  result=$(ts_call "sourcegraph__list_files" "$args_json")
+  # raw format returns GraphQL JSON; extract file paths
+  echo "$result" | jq -r '.data.repository.commit.tree.entries[] | select(.isDirectory == false) | .path'
+}
+
+# List all indexed repos via toolshed -> sourcegraph
+sg_list_repos() {
+  local args_json
+  args_json=$(jq -n --arg c "500" --arg fmt "raw" '{"count": $c, "format": $fmt}')
+  local result
+  result=$(ts_call "sourcegraph__list_repos" "$args_json")
+  echo "$result" | jq -r '.data.repositories.nodes[].name'
+}
+
+# ---------------------------------------------------------------------------
+# CODEOWNERS parsing
+# ---------------------------------------------------------------------------
+
+# Parse a CODEOWNERS file content from stdin. Outputs tab-separated:
+#   line_number \t pattern \t owners
+parse_codeowners() {
+  local line_num=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_num=$((line_num + 1))
+    # Strip leading/trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    # Skip comments and empty lines
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    # Split: first token is pattern, rest are owners
+    local pattern owners
+    pattern=$(echo "$line" | awk '{print $1}')
+    owners=$(echo "$line" | awk '{$1=""; print}' | sed 's/^ *//')
+    [[ -n "$owners" ]] || continue
+    printf '%d\t%s\t%s\n' "$line_num" "$pattern" "$owners"
+  done
+}
+
+# Validate CODEOWNERS content. Returns 0 if valid, 1 if invalid.
+# Prints validation errors to stderr.
+validate_codeowners() {
+  local content="$1"
+  local errors=0
+  local line_num=0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_num=$((line_num + 1))
+    # Strip leading/trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    # Skip comments and empty lines
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    # Must have at least a pattern and one owner
+    local word_count
+    word_count=$(echo "$line" | wc -w | tr -d ' ')
+    if [[ "$word_count" -lt 2 ]]; then
+      echo "  Line $line_num: pattern with no owner: $line" >&2
+      errors=$((errors + 1))
+    fi
+  done <<< "$content"
+
+  return "$errors"
+}
+
+# Match a file path against a CODEOWNERS glob pattern.
+# Returns 0 (match) or 1 (no match).
+match_pattern() {
+  local pattern="$1"
+  local filepath="$2"
+
+  # Normalise: strip leading slash from pattern (we always match from root)
+  local p="${pattern#/}"
+
+  # If pattern ends with /, it matches directories — match anything under it
+  if [[ "$p" == */ ]]; then
+    p="${p}**"
+  fi
+
+  # If pattern has no slash (other than leading), it matches in any directory
+  if [[ "$p" != */* ]]; then
+    # Match basename or any nested path ending with this pattern
+    local basename="${filepath##*/}"
+    # Try direct basename match
+    if [[ "$basename" == $p ]]; then
+      return 0
+    fi
+    # Try matching as **/$p
+    p="**/$p"
+  fi
+
+  # Convert ** to a regex-friendly form for bash matching:
+  # We use a two-pass replacement to avoid conflicts.
+  # Replace ** with a placeholder, then * with single-dir match.
+  local glob="$p"
+
+  # Bash extglob matching: [[ string == pattern ]]
+  # ** should match across directories (any path segments)
+  # We rely on bash glob matching with extglob.
+
+  # Enable extglob for advanced patterns
+  shopt -s extglob 2>/dev/null || true
+
+  # For bash [[ == ]] matching:
+  #   * matches anything except /
+  #   But in [[ ]], * actually matches everything including /
+  # So we need to be careful. Bash [[ $x == $pat ]] treats * as matching
+  # anything including /. This actually works for our ** case too.
+
+  # Simple approach: let bash glob do the work
+  # Replace **/ with */ patterns that bash handles
+  # Actually, in [[ ]], * matches everything including slashes,
+  # so pattern "src/*.js" would incorrectly match "src/a/b.js".
+  # We need to handle this properly.
+
+  # Strategy: convert the CODEOWNERS pattern to a bash-compatible pattern
+  # 1. ** → matches any path (use * in bash [[ ]] since * matches /)
+  # 2. Single * should NOT match / — but bash [[ ]] * does match /
+  # So we convert to a more explicit approach:
+
+  # For simple common cases, use direct matching:
+  # Convert CODEOWNERS glob → bash extended pattern
+  # ** → *  (bash * matches across /)
+  # * (not **) → *([!/])  (extglob: anything except /)
+
+  # Step 1: protect ** by replacing with placeholder
+  local pat="${glob//\*\*/__DOUBLESTAR__}"
+  # Step 2: replace single * with pattern that doesn't cross directories
+  pat="${pat//\*/*([!/])}"
+  # Step 3: restore ** as * (matches everything including /)
+  pat="${pat//__DOUBLESTAR__/*}"
+
+  # Handle ? similarly (matches single non-slash char)
+  pat="${pat//\?/[!/]}"
+
+  if [[ "$filepath" == $pat ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Find owners for a given path in a repo. Implements "last match wins".
+find_owners() {
+  local repo="$1" filepath="$2"
+  local last_owners=""
+
+  while IFS='|' read -r pattern owners; do
+    if match_pattern "$pattern" "$filepath"; then
+      last_owners="$owners"
+    fi
+  done < <(sqlite3 "$DB" "SELECT pattern, owners FROM rules WHERE repo_name='$repo' ORDER BY line_number ASC;" -separator '|')
+
+  echo "$last_owners"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_sync() {
+  local target_repo=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo) target_repo="$2"; shift 2 ;;
+      *) die "Unknown argument: $1" ;;
+    esac
+  done
+
+  init_db
+
+  local repos
+  if [[ -n "$target_repo" ]]; then
+    repos="$target_repo"
+  else
+    repos=$(sg_list_repos)
+  fi
+
+  local synced=0 skipped=0
+
+  while IFS= read -r repo; do
+    [[ -n "$repo" ]] || continue
+    local found=false
+    for co_path in "${CODEOWNERS_PATHS[@]}"; do
+      local content
+      content=$(sg_read_file "$repo" "$co_path" 2>/dev/null) || true
+      if [[ -n "$content" ]]; then
+        # Clear old rules for this repo
+        sqlite3 "$DB" "DELETE FROM rules WHERE repo_name='$(echo "$repo" | sed "s/'/''/g")';"
+
+        # Parse and insert rules
+        local esc_repo
+        esc_repo=$(echo "$repo" | sed "s/'/''/g")
+        while IFS=$'\t' read -r line_num pattern owners; do
+          local esc_pattern esc_owners
+          esc_pattern=$(echo "$pattern" | sed "s/'/''/g")
+          esc_owners=$(echo "$owners" | sed "s/'/''/g")
+          sqlite3 "$DB" "INSERT INTO rules (repo_name, pattern, owners, line_number) VALUES ('$esc_repo', '$esc_pattern', '$esc_owners', $line_num);"
+        done < <(echo "$content" | parse_codeowners)
+
+        # Upsert repo record
+        sqlite3 "$DB" "INSERT INTO repos (name, codeowners_path, last_synced) VALUES ('$esc_repo', '$co_path', datetime('now'))
+          ON CONFLICT(name) DO UPDATE SET codeowners_path='$co_path', last_synced=datetime('now');"
+
+        echo "Synced: $repo (from $co_path)"
+        synced=$((synced + 1))
+        found=true
+        break
+      fi
+    done
+    if [[ "$found" == "false" ]]; then
+      skipped=$((skipped + 1))
+    fi
+  done <<< "$repos"
+
+  echo ""
+  echo "Sync complete: $synced repos synced, $skipped repos skipped (no CODEOWNERS found)."
+}
+
+cmd_get() {
+  local repo="${1:-}" filepath="${2:-}"
+  [[ -n "$repo" ]] || die "Usage: code-owners get <repo> <path>"
+  [[ -n "$filepath" ]] || die "Usage: code-owners get <repo> <path>"
+
+  init_db
+
+  # Check repo exists in DB
+  local count
+  count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM repos WHERE name='$(echo "$repo" | sed "s/'/''/g")';")
+  [[ "$count" -gt 0 ]] || die "Repo '$repo' not found in database. Run 'sync' first."
+
+  local owners
+  owners=$(find_owners "$repo" "$filepath")
+
+  if [[ -n "$owners" ]]; then
+    echo "File:   $filepath"
+    echo "Repo:   $repo"
+    echo "Owners: $owners"
+  else
+    echo "File:   $filepath"
+    echo "Repo:   $repo"
+    echo "Owners: (none — file is unowned)"
+  fi
+}
+
+cmd_create() {
+  local repo="" file_path="" content=""
+  # Parse positional and flags
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --file) file_path="$2"; shift 2 ;;
+      --content) content="$2"; shift 2 ;;
+      -*)  die "Unknown argument: $1" ;;
+      *)
+        if [[ -z "$repo" ]]; then
+          repo="$1"; shift
+        else
+          die "Unexpected argument: $1"
+        fi
+        ;;
+    esac
+  done
+
+  [[ -n "$repo" ]] || die "Usage: code-owners create <repo> [--file <path>] [--content <string>]"
+
+  # Resolve content from --file or --content
+  if [[ -n "$file_path" ]]; then
+    [[ -f "$file_path" ]] || die "File not found: $file_path"
+    content=$(cat "$file_path")
+  fi
+  [[ -n "$content" ]] || die "No content provided. Use --file or --content."
+
+  init_db
+
+  # Check repo does NOT already exist
+  local esc_repo
+  esc_repo=$(echo "$repo" | sed "s/'/''/g")
+  local count
+  count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM repos WHERE name='$esc_repo';")
+  if [[ "$count" -gt 0 ]]; then
+    die "Repo '$repo' already exists in database. Use 'update' to replace or 'delete' first."
+  fi
+
+  # Validate content
+  if ! validate_codeowners "$content" 2>&1; then
+    die "CODEOWNERS content has validation errors (see above)."
+  fi
+
+  # Parse and insert rules
+  local rule_count=0
+  while IFS=$'\t' read -r line_num pattern owners; do
+    local esc_pattern esc_owners
+    esc_pattern=$(echo "$pattern" | sed "s/'/''/g")
+    esc_owners=$(echo "$owners" | sed "s/'/''/g")
+    sqlite3 "$DB" "INSERT INTO rules (repo_name, pattern, owners, line_number) VALUES ('$esc_repo', '$esc_pattern', '$esc_owners', $line_num);"
+    rule_count=$((rule_count + 1))
+  done < <(echo "$content" | parse_codeowners)
+
+  # Insert repo record
+  local co_path="CODEOWNERS"
+  if [[ -n "$file_path" ]]; then
+    co_path=$(basename "$file_path")
+  fi
+  sqlite3 "$DB" "INSERT INTO repos (name, codeowners_path, last_synced) VALUES ('$esc_repo', '$co_path', datetime('now'));"
+
+  echo "Created: $repo ($rule_count rules stored)"
+}
+
+cmd_update() {
+  local repo="" file_path="" content=""
+  # Parse positional and flags
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --file) file_path="$2"; shift 2 ;;
+      --content) content="$2"; shift 2 ;;
+      -*)  die "Unknown argument: $1" ;;
+      *)
+        if [[ -z "$repo" ]]; then
+          repo="$1"; shift
+        else
+          die "Unexpected argument: $1"
+        fi
+        ;;
+    esac
+  done
+
+  [[ -n "$repo" ]] || die "Usage: code-owners update <repo> [--file <path>] [--content <string>]"
+
+  # Resolve content from --file or --content
+  if [[ -n "$file_path" ]]; then
+    [[ -f "$file_path" ]] || die "File not found: $file_path"
+    content=$(cat "$file_path")
+  fi
+  [[ -n "$content" ]] || die "No content provided. Use --file or --content."
+
+  init_db
+
+  # Check repo DOES exist
+  local esc_repo
+  esc_repo=$(echo "$repo" | sed "s/'/''/g")
+  local count
+  count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM repos WHERE name='$esc_repo';")
+  if [[ "$count" -eq 0 ]]; then
+    die "Repo '$repo' not found in database. Use 'create' to add it first."
+  fi
+
+  # Validate content
+  if ! validate_codeowners "$content" 2>&1; then
+    die "CODEOWNERS content has validation errors (see above)."
+  fi
+
+  # Clear old rules
+  sqlite3 "$DB" "DELETE FROM rules WHERE repo_name='$esc_repo';"
+
+  # Parse and insert new rules
+  local rule_count=0
+  while IFS=$'\t' read -r line_num pattern owners; do
+    local esc_pattern esc_owners
+    esc_pattern=$(echo "$pattern" | sed "s/'/''/g")
+    esc_owners=$(echo "$owners" | sed "s/'/''/g")
+    sqlite3 "$DB" "INSERT INTO rules (repo_name, pattern, owners, line_number) VALUES ('$esc_repo', '$esc_pattern', '$esc_owners', $line_num);"
+    rule_count=$((rule_count + 1))
+  done < <(echo "$content" | parse_codeowners)
+
+  # Update repo record
+  local co_path="CODEOWNERS"
+  if [[ -n "$file_path" ]]; then
+    co_path=$(basename "$file_path")
+  fi
+  sqlite3 "$DB" "UPDATE repos SET codeowners_path='$co_path', last_synced=datetime('now') WHERE name='$esc_repo';"
+
+  echo "Updated: $repo ($rule_count rules replaced)"
+}
+
+cmd_delete() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "Usage: code-owners delete <repo>"
+
+  init_db
+
+  local esc_repo
+  esc_repo=$(echo "$repo" | sed "s/'/''/g")
+
+  # Check repo exists
+  local count
+  count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM repos WHERE name='$esc_repo';")
+  if [[ "$count" -eq 0 ]]; then
+    die "Repo '$repo' not found in database."
+  fi
+
+  # Get rule count for confirmation message
+  local rule_count
+  rule_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM rules WHERE repo_name='$esc_repo';")
+
+  # Delete rules and repo entry
+  sqlite3 "$DB" "DELETE FROM rules WHERE repo_name='$esc_repo';"
+  sqlite3 "$DB" "DELETE FROM repos WHERE name='$esc_repo';"
+
+  echo "Deleted: $repo ($rule_count rules removed)"
+}
+
+cmd_search() {
+  local owner="" target_repo=""
+  # Parse positional and flags
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo) target_repo="$2"; shift 2 ;;
+      -*) die "Unknown argument: $1" ;;
+      *)
+        if [[ -z "$owner" ]]; then
+          owner="$1"; shift
+        else
+          die "Unexpected argument: $1"
+        fi
+        ;;
+    esac
+  done
+  [[ -n "$owner" ]] || die "Usage: code-owners search <owner> [--repo <repo>]"
+
+  init_db
+
+  # Ensure owner starts with @ for matching, but also match without
+  local owner_pattern
+  owner_pattern=$(echo "$owner" | sed "s/'/''/g")
+
+  local where="owners LIKE '%${owner_pattern}%'"
+  if [[ -n "$target_repo" ]]; then
+    local esc_repo
+    esc_repo=$(echo "$target_repo" | sed "s/'/''/g")
+    where="$where AND repo_name='$esc_repo'"
+  fi
+
+  local results
+  results=$(sqlite3 -header -column "$DB" \
+    "SELECT repo_name AS repo, pattern, owners, line_number AS line FROM rules WHERE $where ORDER BY repo_name, line_number;")
+
+  if [[ -n "$results" ]]; then
+    echo "$results"
+  else
+    echo "No rules found for owner '$owner'."
+  fi
+}
+
+cmd_list_repos() {
+  init_db
+
+  local results
+  results=$(sqlite3 -header -column "$DB" \
+    "SELECT r.name AS repo, r.codeowners_path AS path, r.last_synced,
+            COUNT(ru.id) AS rules
+     FROM repos r
+     LEFT JOIN rules ru ON ru.repo_name = r.name
+     GROUP BY r.name
+     ORDER BY r.name;")
+
+  if [[ -n "$results" ]]; then
+    echo "$results"
+  else
+    echo "No repos synced yet. Run 'sync' first."
+  fi
+}
+
+cmd_list_owners() {
+  local target_repo=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo) target_repo="$2"; shift 2 ;;
+      *) die "Unknown argument: $1" ;;
+    esac
+  done
+
+  init_db
+
+  local where=""
+  if [[ -n "$target_repo" ]]; then
+    local esc_repo
+    esc_repo=$(echo "$target_repo" | sed "s/'/''/g")
+    where="WHERE repo_name='$esc_repo'"
+  fi
+
+  # Owners are space-separated in the column; we need to split and aggregate.
+  # Use a recursive CTE or just process in bash.
+  local raw
+  raw=$(sqlite3 "$DB" "SELECT owners FROM rules $where;")
+
+  if [[ -z "$raw" ]]; then
+    echo "No owners found. Run 'sync' first."
+    return
+  fi
+
+  # Split all owners, count occurrences
+  echo "$raw" \
+    | tr ' ' '\n' \
+    | sed '/^$/d' \
+    | sort \
+    | uniq -c \
+    | sort -rn \
+    | awk '{printf "%-6s %s\n", $1, $2}' \
+    | (echo "$(printf '%-6s %s' 'RULES' 'OWNER')"; cat)
+}
+
+cmd_unowned() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "Usage: code-owners unowned <repo>"
+
+  init_db
+
+  # Check repo exists in DB
+  local count
+  count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM repos WHERE name='$(echo "$repo" | sed "s/'/''/g")';")
+  [[ "$count" -gt 0 ]] || die "Repo '$repo' not found in database. Run 'sync' first."
+
+  echo "Fetching file list from Sourcegraph..."
+  local files
+  files=$(sg_list_files "$repo")
+
+  if [[ -z "$files" ]]; then
+    die "No files found in repo '$repo' (or failed to fetch)."
+  fi
+
+  local total=0 unowned=0
+  local unowned_files=()
+
+  while IFS= read -r filepath; do
+    [[ -n "$filepath" ]] || continue
+    total=$((total + 1))
+    local owners
+    owners=$(find_owners "$repo" "$filepath")
+    if [[ -z "$owners" ]]; then
+      unowned=$((unowned + 1))
+      unowned_files+=("$filepath")
+    fi
+  done <<< "$files"
+
+  echo ""
+  echo "Repo: $repo"
+  echo "Total files: $total"
+  echo "Unowned files: $unowned"
+  echo ""
+
+  if [[ ${#unowned_files[@]} -gt 0 ]]; then
+    echo "Files with no owner:"
+    printf '  %s\n' "${unowned_files[@]}"
+  else
+    echo "All files have owners."
+  fi
+}
+
+cmd_health() {
+  local ok=true
+
+  # Check Sourcegraph connectivity via toolshed
+  echo "=== Sourcegraph ==="
+  local sg_health
+  if sg_health=$(ts_call "sourcegraph__health" "{}" 2>/dev/null); then
+    echo "  Sourcegraph: OK"
+  else
+    echo "  Sourcegraph: UNREACHABLE"
+    ok=false
+  fi
+
+  # Check DB state
+  echo ""
+  echo "=== Database ==="
+  if [[ -f "$DB" ]]; then
+    local repo_count rule_count
+    repo_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM repos;" 2>/dev/null || echo 0)
+    rule_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM rules;" 2>/dev/null || echo 0)
+    echo "  Database: $DB"
+    echo "  Repos tracked: $repo_count"
+    echo "  Total rules: $rule_count"
+  else
+    echo "  Database: NOT INITIALIZED (run 'sync' first)"
+  fi
+
+  echo ""
+  if [[ "$ok" == "true" ]]; then
+    echo "Overall: HEALTHY"
+  else
+    echo "Overall: DEGRADED"
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+  sync)        cmd_sync "$@" ;;
+  get)         cmd_get "$@" ;;
+  create)      cmd_create "$@" ;;
+  update)      cmd_update "$@" ;;
+  delete)      cmd_delete "$@" ;;
+  search)      cmd_search "$@" ;;
+  list-repos)  cmd_list_repos "$@" ;;
+  list-owners) cmd_list_owners "$@" ;;
+  unowned)     cmd_unowned "$@" ;;
+  health)      cmd_health "$@" ;;
+  *)           die "Unknown command: '$COMMAND'. Available: sync, get, create, update, delete, search, list-repos, list-owners, unowned, health" ;;
+esac
