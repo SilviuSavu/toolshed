@@ -1,0 +1,449 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# code-monitor — watch for new commits via Sourcegraph and send alerts
+# ---------------------------------------------------------------------------
+
+DB_DIR="$HOME/.toolshed/data"
+DB_PATH="$DB_DIR/code-monitor.db"
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+# ---- helpers --------------------------------------------------------------
+
+ensure_db() {
+  mkdir -p "$DB_DIR"
+  sqlite3 "$DB_PATH" <<'SQL'
+CREATE TABLE IF NOT EXISTS monitors (
+    name TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    webhook TEXT,
+    interval_min INTEGER DEFAULT 15,
+    last_checked TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    monitor_name TEXT NOT NULL,
+    match_count INTEGER,
+    matches TEXT,
+    fired_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (monitor_name) REFERENCES monitors(name)
+);
+SQL
+}
+
+load_credentials() {
+  local vault_resp
+  vault_resp=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" \
+    "$VAULT_ADDR/v1/secret/data/sourcegraph") || {
+    echo "ERROR: failed to fetch Sourcegraph credentials from Vault" >&2
+    exit 1
+  }
+  SRC_URL=$(echo "$vault_resp" | jq -r '.data.data.url')
+  SRC_TOKEN=$(echo "$vault_resp" | jq -r '.data.data.token')
+
+  if [[ -z "$SRC_URL" || "$SRC_URL" == "null" ]]; then
+    echo "ERROR: Sourcegraph URL not found in Vault response" >&2
+    exit 1
+  fi
+  if [[ -z "$SRC_TOKEN" || "$SRC_TOKEN" == "null" ]]; then
+    echo "ERROR: Sourcegraph token not found in Vault response" >&2
+    exit 1
+  fi
+}
+
+sourcegraph_search() {
+  local query="$1"
+  local gql_query
+  gql_query=$(jq -n --arg q "$query" '{
+    query: "query Search($query: String!) { search(query: $query) { results { results { ... on CommitSearchResult { commit { repository { name } oid abbreviatedOID message { subject } author { person { displayName } date } } diffPreview { value } } ... on FileMatch { repository { name } file { path } lineMatches { preview lineNumber } } } matchCount } } }",
+    variables: { query: $q }
+  }')
+
+  curl -sf \
+    -H "Authorization: token $SRC_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$gql_query" \
+    "$SRC_URL/.api/graphql"
+}
+
+parse_matches() {
+  local raw="$1"
+  echo "$raw" | jq -c '[
+    .data.search.results.results[:50] | .[] |
+    if .commit then
+      {
+        repo:    .commit.repository.name,
+        file:    null,
+        line:    null,
+        preview: (.commit.message.subject // .commit.abbreviatedOID)
+      }
+    elif .file then
+      {
+        repo:    .repository.name,
+        file:    .file.path,
+        line:    (.lineMatches[0].lineNumber // null),
+        preview: (.lineMatches[0].preview // "")
+      }
+    else
+      {
+        repo:    (.repository.name // "unknown"),
+        file:    null,
+        line:    null,
+        preview: ""
+      }
+    end
+  ]'
+}
+
+fire_webhook() {
+  local webhook="$1" payload="$2"
+  curl -sf -X POST \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "$webhook" >/dev/null 2>&1 || {
+    echo "WARNING: webhook delivery failed for $webhook" >&2
+  }
+}
+
+# ---- commands -------------------------------------------------------------
+
+cmd_create() {
+  local name="" query="" webhook="" interval="15"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)    name="$2";     shift 2 ;;
+      --query)   query="$2";    shift 2 ;;
+      --webhook) webhook="$2";  shift 2 ;;
+      --interval) interval="$2"; shift 2 ;;
+      *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then
+    echo "ERROR: --name is required" >&2; exit 1
+  fi
+  if [[ -z "$query" ]]; then
+    echo "ERROR: --query is required" >&2; exit 1
+  fi
+
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$name';")
+  if [[ "$existing" -gt 0 ]]; then
+    echo "ERROR: monitor '$name' already exists" >&2; exit 1
+  fi
+
+  sqlite3 "$DB_PATH" "INSERT INTO monitors (name, query, webhook, interval_min) VALUES ('$(echo "$name" | sed "s/'/''/g")', '$(echo "$query" | sed "s/'/''/g")', '$(echo "$webhook" | sed "s/'/''/g")', $interval);"
+
+  echo "Created monitor '$name'"
+  echo "  Query:    $query"
+  echo "  Webhook:  ${webhook:-<none>}"
+  echo "  Interval: ${interval}m"
+}
+
+cmd_check() {
+  local name="" since=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)  name="$2";  shift 2 ;;
+      --since) since="$2"; shift 2 ;;
+      *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  ensure_db
+  load_credentials
+
+  if [[ -n "$name" ]]; then
+    check_single_monitor "$name" "$since"
+  else
+    local monitors
+    monitors=$(sqlite3 "$DB_PATH" "SELECT name FROM monitors;")
+    if [[ -z "$monitors" ]]; then
+      echo "No monitors configured."
+      return 0
+    fi
+    while IFS= read -r mon; do
+      check_single_monitor "$mon" "$since"
+    done <<< "$monitors"
+  fi
+}
+
+check_single_monitor() {
+  local name="$1" since_override="$2"
+
+  local row
+  row=$(sqlite3 -separator '|' "$DB_PATH" \
+    "SELECT query, webhook, last_checked FROM monitors WHERE name = '$(echo "$name" | sed "s/'/''/g")';")
+
+  if [[ -z "$row" ]]; then
+    echo "ERROR: monitor '$name' not found" >&2
+    return 1
+  fi
+
+  local query webhook last_checked
+  IFS='|' read -r query webhook last_checked <<< "$row"
+
+  local since
+  if [[ -n "$since_override" ]]; then
+    since="$since_override"
+  elif [[ -n "$last_checked" ]]; then
+    since="$last_checked"
+  else
+    since=$(date -u -v-1d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+  fi
+
+  local full_query="$query after:\"$since\""
+  echo "Checking monitor '$name' (since $since)..."
+
+  local raw_response
+  raw_response=$(sourcegraph_search "$full_query") || {
+    echo "ERROR: Sourcegraph search failed for monitor '$name'" >&2
+    return 1
+  }
+
+  local match_count
+  match_count=$(echo "$raw_response" | jq -r '.data.search.results.matchCount // 0')
+
+  local now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  sqlite3 "$DB_PATH" "UPDATE monitors SET last_checked = '$now' WHERE name = '$(echo "$name" | sed "s/'/''/g")';"
+
+  if [[ "$match_count" -gt 0 ]]; then
+    local matches
+    matches=$(parse_matches "$raw_response")
+
+    sqlite3 "$DB_PATH" "INSERT INTO alerts (monitor_name, match_count, matches) VALUES ('$(echo "$name" | sed "s/'/''/g")', $match_count, '$(echo "$matches" | sed "s/'/''/g")');"
+
+    echo "  Found $match_count new match(es)"
+
+    if [[ -n "$webhook" ]]; then
+      local payload
+      payload=$(jq -n \
+        --arg monitor "$name" \
+        --arg query "$query" \
+        --argjson count "$match_count" \
+        --argjson matches "$matches" \
+        --arg checked_at "$now" \
+        '{
+          monitor: $monitor,
+          query: $query,
+          match_count: $count,
+          matches: $matches,
+          checked_at: $checked_at
+        }')
+      fire_webhook "$webhook" "$payload"
+      echo "  Webhook fired to $webhook"
+    fi
+
+    echo "$matches" | jq -r '.[:5][] | "    - \(.repo) \(.file // "") \(if .line then "L\(.line)" else "" end): \(.preview)"'
+    if [[ "$match_count" -gt 5 ]]; then
+      echo "    ... and $((match_count - 5)) more"
+    fi
+  else
+    echo "  No new matches."
+  fi
+}
+
+cmd_check_all() {
+  ensure_db
+  load_credentials
+
+  local monitors
+  monitors=$(sqlite3 "$DB_PATH" "SELECT name FROM monitors;")
+  if [[ -z "$monitors" ]]; then
+    echo "No monitors configured."
+    return 0
+  fi
+
+  local count=0
+  while IFS= read -r mon; do
+    check_single_monitor "$mon" ""
+    count=$((count + 1))
+  done <<< "$monitors"
+
+  echo ""
+  echo "Checked $count monitor(s)."
+}
+
+cmd_list() {
+  ensure_db
+
+  local rows
+  rows=$(sqlite3 -separator '|' "$DB_PATH" \
+    "SELECT m.name, m.query, m.last_checked, m.interval_min, m.webhook,
+            COALESCE((SELECT match_count FROM alerts WHERE monitor_name = m.name ORDER BY fired_at DESC LIMIT 1), 0)
+     FROM monitors m ORDER BY m.name;")
+
+  if [[ -z "$rows" ]]; then
+    echo "No monitors configured."
+    return 0
+  fi
+
+  printf "%-20s %-40s %-22s %6s %7s %s\n" "NAME" "QUERY" "LAST CHECKED" "ALERTS" "INTV" "WEBHOOK"
+  printf "%-20s %-40s %-22s %6s %7s %s\n" "----" "-----" "------------" "------" "----" "-------"
+
+  while IFS='|' read -r name query last_checked interval webhook last_alert_count; do
+    local wh_flag="n"
+    [[ -n "$webhook" ]] && wh_flag="y"
+    local display_query="$query"
+    if [[ ${#display_query} -gt 40 ]]; then
+      display_query="${display_query:0:37}..."
+    fi
+    printf "%-20s %-40s %-22s %6s %5sm %s\n" \
+      "$name" "$display_query" "${last_checked:-never}" "$last_alert_count" "$interval" "$wh_flag"
+  done <<< "$rows"
+}
+
+cmd_delete() {
+  local name="${1:-}"
+
+  if [[ -z "$name" ]]; then
+    echo "ERROR: monitor name is required" >&2; exit 1
+  fi
+
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(echo "$name" | sed "s/'/''/g")';")
+  if [[ "$existing" -eq 0 ]]; then
+    echo "ERROR: monitor '$name' not found" >&2; exit 1
+  fi
+
+  sqlite3 "$DB_PATH" "DELETE FROM alerts WHERE monitor_name = '$(echo "$name" | sed "s/'/''/g")';"
+  sqlite3 "$DB_PATH" "DELETE FROM monitors WHERE name = '$(echo "$name" | sed "s/'/''/g")';"
+
+  echo "Deleted monitor '$name' and its alert history."
+}
+
+cmd_history() {
+  local name="${1:-}" limit="20"
+
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --limit) limit="$2"; shift 2 ;;
+      *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then
+    echo "ERROR: monitor name is required" >&2; exit 1
+  fi
+
+  ensure_db
+
+  local existing
+  existing=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors WHERE name = '$(echo "$name" | sed "s/'/''/g")';")
+  if [[ "$existing" -eq 0 ]]; then
+    echo "ERROR: monitor '$name' not found" >&2; exit 1
+  fi
+
+  local rows
+  rows=$(sqlite3 -separator '|' "$DB_PATH" \
+    "SELECT fired_at, match_count, matches FROM alerts
+     WHERE monitor_name = '$(echo "$name" | sed "s/'/''/g")'
+     ORDER BY fired_at DESC LIMIT $limit;")
+
+  if [[ -z "$rows" ]]; then
+    echo "No alerts for monitor '$name'."
+    return 0
+  fi
+
+  echo "Recent alerts for '$name':"
+  echo ""
+
+  while IFS='|' read -r fired_at match_count matches; do
+    echo "  [$fired_at] $match_count match(es)"
+    if [[ -n "$matches" && "$matches" != "null" ]]; then
+      echo "$matches" | jq -r '.[:3][] | "    - \(.repo) \(.file // "") \(if .line then "L\(.line)" else "" end): \(.preview)"' 2>/dev/null || true
+    fi
+  done <<< "$rows"
+}
+
+cmd_health() {
+  local errors=0
+
+  # Check Vault / credentials
+  echo "Checking Vault credentials..."
+  if load_credentials 2>/dev/null; then
+    echo "  Vault: OK (Sourcegraph URL: $SRC_URL)"
+  else
+    echo "  Vault: FAIL — cannot fetch Sourcegraph credentials"
+    errors=$((errors + 1))
+  fi
+
+  # Check Sourcegraph connectivity
+  echo "Checking Sourcegraph connectivity..."
+  if [[ -n "${SRC_URL:-}" && -n "${SRC_TOKEN:-}" ]]; then
+    local resp
+    resp=$(curl -sf -o /dev/null -w "%{http_code}" \
+      -H "Authorization: token $SRC_TOKEN" \
+      "$SRC_URL/.api/graphql" \
+      -d '{"query":"{ currentUser { username } }"}' 2>/dev/null) || resp="000"
+    if [[ "$resp" == "200" ]]; then
+      echo "  Sourcegraph API: OK (HTTP $resp)"
+    else
+      echo "  Sourcegraph API: FAIL (HTTP $resp)"
+      errors=$((errors + 1))
+    fi
+  else
+    echo "  Sourcegraph API: SKIPPED (no credentials)"
+    errors=$((errors + 1))
+  fi
+
+  # Check DB
+  echo "Checking database..."
+  ensure_db
+  local monitor_count alert_count
+  monitor_count=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM monitors;")
+  alert_count=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM alerts;")
+  echo "  Database: OK ($DB_PATH)"
+  echo "  Monitors: $monitor_count"
+  echo "  Alerts:   $alert_count"
+
+  if [[ "$errors" -gt 0 ]]; then
+    echo ""
+    echo "Health check completed with $errors error(s)."
+    exit 1
+  else
+    echo ""
+    echo "All checks passed."
+  fi
+}
+
+# ---- dispatch -------------------------------------------------------------
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+  create)    cmd_create "$@" ;;
+  check)     cmd_check "$@" ;;
+  check-all) cmd_check_all "$@" ;;
+  list)      cmd_list "$@" ;;
+  delete)    cmd_delete "$@" ;;
+  history)   cmd_history "$@" ;;
+  health)    cmd_health "$@" ;;
+  *)
+    echo "Usage: code-monitor <command> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  create      Create a new code monitor"
+    echo "  check       Run a check for a specific monitor (or all)"
+    echo "  check-all   Run checks for all active monitors"
+    echo "  list        List all monitors with their status"
+    echo "  delete      Delete a monitor"
+    echo "  history     Show recent alerts for a monitor"
+    echo "  health      Check Sourcegraph connectivity and DB state"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,83 @@
+{
+  "name": "code-monitor",
+  "description": "Watch for new commits matching Sourcegraph search queries and send alerts via webhooks",
+  "category": "monitoring",
+  "type": "native",
+  "max_output": 10000,
+  "health": {
+    "command": "health",
+    "interval": 300
+  },
+  "commands": {
+    "create": {
+      "description": "Create a new code monitor",
+      "args": {
+        "--name": {
+          "required": true,
+          "description": "Monitor name (unique identifier)"
+        },
+        "--query": {
+          "required": true,
+          "description": "Sourcegraph search query (should include type:diff or type:commit)"
+        },
+        "--webhook": {
+          "required": false,
+          "description": "Webhook URL to POST alerts to (e.g., Slack incoming webhook)"
+        },
+        "--interval": {
+          "required": false,
+          "description": "Check interval in minutes (default: 15, informational — actual scheduling is external)"
+        }
+      }
+    },
+    "check": {
+      "description": "Run a check for a specific monitor or all monitors",
+      "args": {
+        "--name": {
+          "required": false,
+          "description": "Specific monitor to check (if omitted, checks all)"
+        },
+        "--since": {
+          "required": false,
+          "description": "Override 'since' time in ISO8601 format (default: last check time from DB)"
+        }
+      }
+    },
+    "check-all": {
+      "description": "Run checks for all active monitors",
+      "args": {}
+    },
+    "list": {
+      "description": "List all monitors with their status",
+      "args": {}
+    },
+    "delete": {
+      "description": "Delete a monitor",
+      "args": {
+        "name": {
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor to delete"
+        }
+      }
+    },
+    "history": {
+      "description": "Show recent alerts for a monitor",
+      "args": {
+        "name": {
+          "required": true,
+          "positional": true,
+          "description": "Name of the monitor"
+        },
+        "--limit": {
+          "required": false,
+          "description": "Maximum number of results to show (default: 20)"
+        }
+      }
+    },
+    "health": {
+      "description": "Check Sourcegraph connectivity and database state",
+      "args": {}
+    }
+  }
+}

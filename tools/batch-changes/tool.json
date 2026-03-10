@@ -1,0 +1,75 @@
+{
+  "name": "batch-changes",
+  "description": "Automate multi-repo changes — apply a sed/patch/script across multiple repositories and open MRs/PRs via Sourcegraph search and GitLab API.",
+  "category": "developer-tools",
+  "type": "native",
+  "max_output": 50000,
+  "health": {
+    "command": "health",
+    "interval": 300,
+    "timeout": 15
+  },
+  "commands": {
+    "create": {
+      "description": "Create a new batch change spec (saved locally, not yet executed)",
+      "args": {
+        "--name": {
+          "required": true,
+          "description": "Batch change name (used as identifier)"
+        },
+        "--description": {
+          "required": false,
+          "description": "Human-readable description of the batch change"
+        },
+        "--query": {
+          "required": true,
+          "description": "Sourcegraph search query to find target repos (e.g. \"repo:myorg/ file:package.json lodash\")"
+        },
+        "--script": {
+          "required": true,
+          "description": "Shell command to run inside each repo clone (e.g. \"sed -i 's/old/new/g' file.txt\")"
+        },
+        "--branch": {
+          "required": false,
+          "description": "Branch name to create in each repo (default: batch/{name})"
+        },
+        "--commit-msg": {
+          "required": false,
+          "description": "Commit message for each repo (default: \"batch-change: {name}\")"
+        }
+      }
+    },
+    "run": {
+      "description": "Execute a batch change: clone repos, apply script, commit, push, and open GitLab MRs",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change to execute"
+        },
+        "--dry-run": {
+          "required": false,
+          "description": "Show what would happen without making any changes"
+        }
+      }
+    },
+    "status": {
+      "description": "Show the status of a batch change (open/merged/closed MRs)",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the batch change to check"
+        }
+      }
+    },
+    "list": {
+      "description": "List all batch change specs",
+      "args": {}
+    },
+    "health": {
+      "description": "Check connectivity to Sourcegraph and GitLab",
+      "args": {}
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "name": "code-owners",
+  "description": "Parse CODEOWNERS files from repositories and resolve file ownership — sync rules from Sourcegraph-indexed repos, query owners for paths, search by owner, and find unowned files.",
+  "category": "developer-tools",
+  "type": "native",
+  "max_output": 50000,
+  "health": {
+    "command": "health",
+    "interval": 300,
+    "timeout": 15
+  },
+  "commands": {
+    "sync": {
+      "description": "Fetch and parse CODEOWNERS files from all indexed repos (or a specific repo)",
+      "args": {
+        "--repo": {
+          "required": false,
+          "description": "Sync a specific repo only (e.g. \"github.com/org/repo\")"
+        }
+      }
+    },
+    "query": {
+      "description": "Find owners for a file path in a repo (last matching CODEOWNERS rule wins)",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name (e.g. \"github.com/org/repo\")"
+        },
+        "path": {
+          "positional": true,
+          "required": true,
+          "description": "File path to check ownership for"
+        }
+      }
+    },
+    "search": {
+      "description": "Find all patterns and repos owned by a person or team",
+      "args": {
+        "owner": {
+          "positional": true,
+          "required": true,
+          "description": "Owner handle (e.g. @username or @org/team)"
+        },
+        "--repo": {
+          "required": false,
+          "description": "Limit search to a specific repo"
+        }
+      }
+    },
+    "list-repos": {
+      "description": "List repos that have CODEOWNERS files with rule counts and last-synced times",
+      "args": {}
+    },
+    "list-owners": {
+      "description": "List all known owners across all repos with rule counts",
+      "args": {
+        "--repo": {
+          "required": false,
+          "description": "Limit to a specific repo"
+        }
+      }
+    },
+    "unowned": {
+      "description": "Find files with no CODEOWNERS coverage in a repo",
+      "args": {
+        "repo": {
+          "positional": true,
+          "required": true,
+          "description": "Repository name to check for unowned files"
+        }
+      }
+    },
+    "health": {
+      "description": "Check Sourcegraph connectivity and database state",
+      "args": {}
+    }
+  }
+}

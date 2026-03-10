@@ -1,0 +1,107 @@
+{
+  "name": "code-insights",
+  "description": "Track Sourcegraph search result counts over time to visualize code trends and compare metrics",
+  "category": "monitoring",
+  "type": "native",
+  "max_output": 25000,
+  "health": {
+    "command": "health",
+    "interval": 300,
+    "timeout": 15
+  },
+  "commands": {
+    "create": {
+      "description": "Create a new insight (tracked metric)",
+      "args": {
+        "--name": {
+          "required": true,
+          "description": "Insight name (e.g. \"deprecated-api-usage\")"
+        },
+        "--query": {
+          "required": true,
+          "description": "Sourcegraph search query (e.g. \"lang:go fmt.Println\")"
+        },
+        "--description": {
+          "required": false,
+          "description": "Human-readable description of the insight"
+        },
+        "--interval": {
+          "required": false,
+          "description": "Collection interval in hours (default: 24, informational — actual scheduling is external)"
+        }
+      }
+    },
+    "collect": {
+      "description": "Run a collection for a specific insight or all insights",
+      "args": {
+        "--name": {
+          "required": false,
+          "description": "Specific insight to collect (if omitted, collects all)"
+        }
+      }
+    },
+    "collect-all": {
+      "description": "Collect data for all insights",
+      "args": {}
+    },
+    "trend": {
+      "description": "Show the trend for an insight with ASCII sparkline chart",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the insight"
+        },
+        "--days": {
+          "required": false,
+          "description": "Number of days to show (default: 30)"
+        },
+        "--format": {
+          "required": false,
+          "description": "Output format: text or json (default: text)"
+        }
+      }
+    },
+    "compare": {
+      "description": "Compare two insights side by side",
+      "args": {
+        "name1": {
+          "positional": true,
+          "required": true,
+          "description": "First insight name"
+        },
+        "name2": {
+          "positional": true,
+          "required": true,
+          "description": "Second insight name"
+        },
+        "--days": {
+          "required": false,
+          "description": "Number of days to show (default: 30)"
+        }
+      }
+    },
+    "snapshot": {
+      "description": "Get current values for all insights without storing results",
+      "args": {}
+    },
+    "list": {
+      "description": "List all insights with their status",
+      "args": {}
+    },
+    "delete": {
+      "description": "Delete an insight and all its collected data",
+      "args": {
+        "name": {
+          "positional": true,
+          "required": true,
+          "description": "Name of the insight to delete"
+        }
+      }
+    },
+    "health": {
+      "description": "Check Sourcegraph connectivity and database state",
+      "args": {}
+    }
+  }
+}
