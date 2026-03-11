@@ -121,44 +121,33 @@ async fn build_tool_index(
                 }
             }
             ToolType::Mcp => {
-                let introspect_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    mcp::introspect::get_raw_mcp_tool_defs(tool),
-                )
-                .await;
-                match introspect_result {
-                    Err(_) => {
-                        eprintln!("warning: timed out introspecting MCP tool '{}'", name);
-                        continue;
-                    }
-                    Ok(inner) => match inner {
-                        Ok(defs) => {
-                            for mcp_def in defs {
-                                let namespaced = format!("{name}__{}", mcp_def.name);
-                                let mut schema = mcp_def.input_schema.clone();
-                                if let Some(ref mut s) = schema {
-                                    sanitize_schema(s);
-                                }
-                                exposed.push(ExposedTool {
-                                    namespaced_name: namespaced.clone(),
-                                    def: McpToolDef {
-                                        name: namespaced,
-                                        description: mcp_def.description.clone(),
-                                        input_schema: schema,
-                                    },
-                                    tool_name: name.clone(),
-                                    command_name: mcp_def.name,
-                                    tool_type: ToolType::Mcp,
-                                });
+                match mcp::introspect::get_raw_mcp_tool_defs(tool).await {
+                    Ok(defs) => {
+                        for mcp_def in defs {
+                            let namespaced = format!("{name}__{}", mcp_def.name);
+                            let mut schema = mcp_def.input_schema.clone();
+                            if let Some(ref mut s) = schema {
+                                sanitize_schema(s);
                             }
+                            exposed.push(ExposedTool {
+                                namespaced_name: namespaced.clone(),
+                                def: McpToolDef {
+                                    name: namespaced,
+                                    description: mcp_def.description.clone(),
+                                    input_schema: schema,
+                                },
+                                tool_name: name.clone(),
+                                command_name: mcp_def.name,
+                                tool_type: ToolType::Mcp,
+                            });
                         }
-                        Err(e) => {
-                            eprintln!(
-                                "warning: failed to introspect MCP tool '{}': {}",
-                                name, e
-                            );
-                        }
-                    },
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to introspect MCP tool '{}': {}",
+                            name, e
+                        );
+                    }
                 }
             }
         }

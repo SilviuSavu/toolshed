@@ -1,24 +1,20 @@
-use crate::config::DEFAULT_TOOL_TIMEOUT_SECS;
 use crate::env;
 use crate::error::ToolshedError;
 use crate::mcp::protocol::*;
 use crate::registry::Tool;
-use std::time::Duration;
 
 /// Call a tool via MCP streamable HTTP transport.
 pub async fn call_tool(
     tool: &Tool,
     tool_name: &str,
     arguments: serde_json::Value,
-    timeout: Option<u64>,
+    _timeout: Option<u64>,
 ) -> Result<String, ToolshedError> {
     let mcp_cfg = tool.manifest.mcp.as_ref().unwrap();
     let url = mcp_cfg.url.as_ref().unwrap();
     let headers = env::interpolate_map(&mcp_cfg.headers)?;
-    let timeout_secs = timeout.unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS);
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .map_err(|e| ToolshedError::McpHttpError {
             tool: tool.manifest.name.clone(),
@@ -124,10 +120,8 @@ pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
     let mcp_cfg = tool.manifest.mcp.as_ref().unwrap();
     let url = mcp_cfg.url.as_ref().unwrap();
     let headers = env::interpolate_map(&mcp_cfg.headers)?;
-    let timeout_secs = 30u64;
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .map_err(|e| ToolshedError::McpHttpError {
             tool: tool.manifest.name.clone(),
