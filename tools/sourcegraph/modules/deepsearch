@@ -2,7 +2,11 @@
 set -euo pipefail
 
 ###############################################################################
-# deepsearch — multi-step LLM-driven code research across Sourcegraph + local
+# deepsearch — multi-step LLM-driven code research via native function calling
+#
+# Uses GLM-5's native tool_calls API (OpenAI-compatible) instead of parsing
+# JSON from content. The model decides which tools to call, we execute them
+# and return results via role:tool messages.
 #
 # Providers: zai (default, GLM-5), openrouter (Qwen3-coder)
 ###############################################################################
@@ -12,7 +16,7 @@ DB_PATH="$DB_DIR/deepsearch.db"
 TOOLSHED_URL="${TOOLSHED_URL:-http://127.0.0.1:8081}"
 VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
 VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
-MAX_STEPS=5
+MAX_STEPS=10
 MAX_TOOL_OUTPUT=4000
 PROVIDER="${DEEPSEARCH_PROVIDER:-zai}"
 
@@ -61,13 +65,51 @@ load_provider() {
     fi
 }
 
-llm_chat() {
+# ---------------------------------------------------------------------------
+# Tool definitions for native function calling
+# ---------------------------------------------------------------------------
+TOOLS_JSON='[
+  {"type":"function","function":{"name":"sourcegraph__keyword_search","description":"Search code across ALL remote repositories on Sourcegraph","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"count":{"type":"string","description":"Max results (default 30)"}},"required":["query"]}}},
+  {"type":"function","function":{"name":"narsil__hybrid_search","description":"Semantic + keyword search on locally indexed repositories","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"repo":{"type":"string","description":"Limit to specific repo"},"limit":{"type":"integer","description":"Max results (default 10)"}},"required":["query"]}}},
+  {"type":"function","function":{"name":"sourcegraph__symbols","description":"Find code symbols (functions, classes, types) across repositories","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Symbol name to search"},"repo":{"type":"string","description":"Limit to specific repo"},"kind":{"type":"string","description":"Symbol kind filter"}},"required":["query"]}}},
+  {"type":"function","function":{"name":"sourcegraph__read_file","description":"Read file content from a repository","parameters":{"type":"object","properties":{"repo":{"type":"string","description":"Repository name"},"path":{"type":"string","description":"File path"},"rev":{"type":"string","description":"Revision (default HEAD)"}},"required":["repo","path"]}}},
+  {"type":"function","function":{"name":"narsil__go_to_definition","description":"Find definition of a symbol (AST-based)","parameters":{"type":"object","properties":{"repo":{"type":"string","description":"Repository name"},"file":{"type":"string","description":"File path"},"symbol":{"type":"string","description":"Symbol name"}},"required":["repo","file","symbol"]}}},
+  {"type":"function","function":{"name":"narsil__find_references","description":"Find all references to a symbol (AST-based)","parameters":{"type":"object","properties":{"repo":{"type":"string","description":"Repository name"},"symbol":{"type":"string","description":"Symbol name"}},"required":["repo","symbol"]}}},
+  {"type":"function","function":{"name":"narsil__call_graph","description":"Get outgoing function calls from a function","parameters":{"type":"object","properties":{"repo":{"type":"string","description":"Repository name"},"file":{"type":"string","description":"File path"},"function":{"type":"string","description":"Function name"}},"required":["repo","file","function"]}}},
+  {"type":"function","function":{"name":"narsil__callers","description":"Find all callers of a function","parameters":{"type":"object","properties":{"repo":{"type":"string","description":"Repository name"},"file":{"type":"string","description":"File path"},"function":{"type":"string","description":"Function name"}},"required":["repo","file","function"]}}},
+  {"type":"function","function":{"name":"lsp__find_definition","description":"Find definition of a symbol (compiler-accurate via LSP)","parameters":{"type":"object","properties":{"file_path":{"type":"string","description":"Full file path"},"symbol_name":{"type":"string","description":"Symbol name"}},"required":["file_path","symbol_name"]}}},
+  {"type":"function","function":{"name":"lsp__find_references","description":"Find all references to a symbol (compiler-accurate via LSP)","parameters":{"type":"object","properties":{"file_path":{"type":"string","description":"Full file path"},"symbol_name":{"type":"string","description":"Symbol name"}},"required":["file_path","symbol_name"]}}}
+]'
+
+SYSTEM_PROMPT='You are a code research assistant. Investigate questions about codebases by using the provided tools.
+
+Strategy:
+- Search broadly first (keyword_search, hybrid_search)
+- Read specific files to understand implementation details
+- Trace definitions and references for deeper understanding
+- Use call graphs to understand control flow
+
+When you have enough information, respond with your final answer in markdown.
+Do not call tools unnecessarily — be strategic and efficient.'
+
+# ---------------------------------------------------------------------------
+# LLM call — returns raw response JSON
+# ---------------------------------------------------------------------------
+llm_call() {
     local messages_json="$1"
     local payload
     payload=$(jq -n \
         --arg model "$LLM_MODEL" \
         --argjson messages "$messages_json" \
-        '{model: $model, messages: $messages, max_tokens: 131072, thinking: {type: "enabled", clear_thinking: false}}')
+        --argjson tools "$TOOLS_JSON" \
+        '{
+            model: $model,
+            messages: $messages,
+            tools: $tools,
+            tool_choice: "auto",
+            max_tokens: 131072,
+            thinking: {type: "enabled", clear_thinking: false}
+        }')
 
     local http_response http_code body
     http_response=$(curl -s --max-time 300 -w '\n%{http_code}' \
@@ -84,9 +126,12 @@ llm_chat() {
         die "LLM API failed ($PROVIDER: $LLM_MODEL) HTTP $http_code: $err_msg"
     fi
 
-    echo "$body" | jq -r '.choices[0].message.content // empty'
+    echo "$body"
 }
 
+# ---------------------------------------------------------------------------
+# Toolshed call
+# ---------------------------------------------------------------------------
 ts_call() {
     local tool_name="$1"
     local args_json="$2"
@@ -116,6 +161,9 @@ ts_call() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# SQLite
+# ---------------------------------------------------------------------------
 ensure_db() {
     mkdir -p "$DB_DIR"
     sqlite3 "$DB_PATH" <<'SQL'
@@ -138,60 +186,9 @@ generate_id() {
     printf '%s-%s' "$(date +%s)" "$(head -c4 /dev/urandom | xxd -p)"
 }
 
-SYSTEM_PROMPT='You are a code research assistant. You investigate complex questions about codebases by searching, reading files, and tracing code paths.
-
-Available tools (call via tool_calls array):
-- sourcegraph__keyword_search: {query, count?} — search across ALL remote repos
-- narsil__hybrid_search: {query, repo?, limit?} — semantic+keyword on local repos
-- sourcegraph__symbols: {query, repo?, kind?} — find symbols across repos
-- sourcegraph__read_file: {repo, path, rev?} — read file from a repo
-- narsil__go_to_definition: {repo, file, symbol} — AST-based go-to-def
-- narsil__find_references: {repo, symbol} — AST-based find refs
-- narsil__call_graph: {repo, file, function} — outgoing calls from a function
-- narsil__callers: {repo, file, function} — incoming callers of a function
-- lsp__find_definition: {file_path, symbol_name} — compiler-accurate definition
-- lsp__find_references: {file_path, symbol_name} — compiler-accurate references
-
-Reply ONLY with valid JSON (no markdown fences, no extra text). Two formats:
-
-1. Need more research:
-{"status":"research","tool_calls":[{"tool":"tool_name","args":{...}}],"reasoning":"brief explanation"}
-
-2. Ready to answer:
-{"status":"done","answer":"your detailed markdown answer here"}
-
-Rules:
-- Max 3 tool_calls per step
-- Search broadly first, then drill into specific files
-- Always explain your reasoning
-- When done, provide a thorough answer with file paths and code references
-- If you cannot find enough information, say so honestly'
-
-execute_tool_calls() {
-    local response_json="$1"
-    local results=""
-    local num_calls
-    num_calls=$(echo "$response_json" | jq '.tool_calls | length')
-
-    for ((i = 0; i < num_calls && i < 3; i++)); do
-        local tool args
-        tool=$(echo "$response_json" | jq -r ".tool_calls[$i].tool")
-        args=$(echo "$response_json" | jq -c ".tool_calls[$i].args")
-
-        local result
-        result=$(ts_call "$tool" "$args")
-
-        results="${results}### Tool: ${tool}
-Args: ${args}
-Result:
-${result}
-
-"
-    done
-
-    echo "$results"
-}
-
+# ---------------------------------------------------------------------------
+# Main agent loop
+# ---------------------------------------------------------------------------
 cmd_deepsearch() {
     local question="" provider="$PROVIDER"
 
@@ -223,7 +220,7 @@ cmd_deepsearch() {
         --arg question "$question" \
         '[
             {"role": "system", "content": $system},
-            {"role": "user", "content": ("Research this question:\n\n" + $question)}
+            {"role": "user", "content": $question}
         ]')
 
     local step=0
@@ -233,66 +230,74 @@ cmd_deepsearch() {
     while [[ $step -lt $MAX_STEPS ]]; do
         step=$((step + 1))
 
-        local llm_response
-        llm_response=$(llm_chat "$messages")
+        local raw_response
+        raw_response=$(llm_call "$messages")
 
-        if [[ -z "$llm_response" ]]; then
-            final_status="error"
-            answer="LLM returned empty response at step $step"
-            break
-        fi
+        local finish_reason
+        finish_reason=$(echo "$raw_response" | jq -r '.choices[0].finish_reason // "stop"')
 
-        messages=$(echo "$messages" | jq --arg content "$llm_response" \
-            '. + [{"role": "assistant", "content": $content}]')
+        local message
+        message=$(echo "$raw_response" | jq -c '.choices[0].message')
 
-        local parsed
-        parsed=$(echo "$llm_response" | sed 's/^```json//;s/^```//;s/```$//' \
-            | jq -c '.' 2>/dev/null) || true
+        # Append assistant message to history (preserves tool_calls structure)
+        messages=$(echo "$messages" | jq --argjson msg "$message" '. + [$msg]')
 
-        if [[ -z "$parsed" ]]; then
-            parsed=$(echo "$llm_response" | grep -o '{.*}' | head -1 \
-                | jq -c '.' 2>/dev/null) || true
-        fi
+        if [[ "$finish_reason" == "tool_calls" ]]; then
+            # Model wants to call tools — execute each and append tool results
+            local num_calls
+            num_calls=$(echo "$message" | jq '.tool_calls | length')
 
-        if [[ -z "$parsed" ]]; then
-            answer="$llm_response"
-            break
-        fi
+            for ((i = 0; i < num_calls; i++)); do
+                local call_id tool_name arguments
+                call_id=$(echo "$message" | jq -r ".tool_calls[$i].id")
+                tool_name=$(echo "$message" | jq -r ".tool_calls[$i].function.name")
+                arguments=$(echo "$message" | jq -r ".tool_calls[$i].function.arguments")
 
-        local status
-        status=$(echo "$parsed" | jq -r '.status // "unknown"')
+                # arguments comes as string from the API, parse it
+                local args_obj
+                args_obj=$(echo "$arguments" | jq -c '.' 2>/dev/null) || args_obj="$arguments"
 
-        if [[ "$status" == "done" ]]; then
-            answer=$(echo "$parsed" | jq -r '.answer // empty')
-            break
-        elif [[ "$status" == "research" ]]; then
-            local tool_results
-            tool_results=$(execute_tool_calls "$parsed")
+                local result
+                result=$(ts_call "$tool_name" "$args_obj")
 
-            messages=$(echo "$messages" | jq --arg content "$tool_results" \
-                '. + [{"role": "user", "content": ("Tool results:\n\n" + $content + "\n\nContinue researching or provide your final answer.")}]')
+                # Append tool result message
+                messages=$(echo "$messages" | jq \
+                    --arg role "tool" \
+                    --arg content "$result" \
+                    --arg tool_call_id "$call_id" \
+                    '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
+            done
         else
-            answer="$llm_response"
+            # Model responded with content — this is the final answer
+            answer=$(echo "$message" | jq -r '.content // empty')
             break
         fi
     done
 
+    # If we hit MAX_STEPS without a final answer, force one
     if [[ -z "$answer" && $step -ge $MAX_STEPS ]]; then
         messages=$(echo "$messages" | jq \
-            '. + [{"role": "user", "content": "You have reached the maximum number of research steps. Synthesize a final answer now from all information gathered. Reply with {\"status\":\"done\",\"answer\":\"...\"}"}]')
+            '. + [{"role": "user", "content": "Synthesize your final answer now based on all research so far."}]')
 
-        local final_response
-        final_response=$(llm_chat "$messages")
-        local final_parsed
-        final_parsed=$(echo "$final_response" | sed 's/^```json//;s/^```//;s/```$//' \
-            | jq -c '.' 2>/dev/null) || true
+        # Call without tools to force a text response
+        local final_payload
+        final_payload=$(jq -n \
+            --arg model "$LLM_MODEL" \
+            --argjson messages "$messages" \
+            '{model: $model, messages: $messages, max_tokens: 131072, thinking: {type: "enabled", clear_thinking: false}}')
 
-        if [[ -n "$final_parsed" ]]; then
-            answer=$(echo "$final_parsed" | jq -r '.answer // empty')
-        fi
-        [[ -z "$answer" ]] && answer="$final_response"
+        local final_resp
+        final_resp=$(curl -s --max-time 300 \
+            -H "Authorization: Bearer $LLM_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$final_payload" \
+            "$LLM_BASE_URL")
+
+        answer=$(echo "$final_resp" | jq -r '.choices[0].message.content // empty')
+        [[ -z "$answer" ]] && answer="Failed to synthesize answer after $MAX_STEPS steps"
     fi
 
+    # Store in SQLite
     local tmpdir
     tmpdir=$(mktemp -d)
     echo "$answer" > "$tmpdir/answer"
