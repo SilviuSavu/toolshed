@@ -1,0 +1,19 @@
+{
+  "name": "huly",
+  "description": "Huly project management — issues, documents, channels, calendar, time tracking",
+  "category": "project-management",
+  "type": "mcp",
+  "max_output": 8192,
+  "mcp": {
+    "transport": "stdio",
+    "command": "huly-mcp",
+    "args": [],
+    "env": {
+      "HULY_URL": "${HULY_URL}",
+      "HULY_EMAIL": "${HULY_EMAIL}",
+      "HULY_PASSWORD": "${HULY_PASSWORD}",
+      "HULY_WORKSPACE": "${HULY_WORKSPACE}"
+    }
+  },
+  "health": "npx -y @firfi/huly-mcp@latest --help >/dev/null 2>&1"
+}

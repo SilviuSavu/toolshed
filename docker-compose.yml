@@ -1,0 +1,90 @@
+services:
+  toolshed:
+    build:
+      context: .
+      dockerfile: Dockerfile.toolshed
+    ports:
+      - "8081:8081"
+    environment:
+      # Vault (secrets store)
+      - VAULT_ADDR=${VAULT_ADDR:-http://host.docker.internal:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN:-toolshed-dev-token}
+      # GitLab
+      - GITLAB_TOKEN=${GITLAB_TOKEN}
+      - GITLAB_BASE_URL=${GITLAB_BASE_URL:-http://gitlab}
+      # Search APIs
+      - BRAVE_API_KEY=${BRAVE_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DEEPINFRA_API_KEY=${DEEPINFRA_API_KEY}
+      # Infrastructure
+      - DATABASE_URI=${DATABASE_URI:-postgresql://host.docker.internal:5432}
+      - QDRANT_URL=${QDRANT_URL:-http://host.docker.internal:6333}
+      - E2B_API_KEY=${E2B_API_KEY}
+      - UNLEASH_API_TOKEN=${UNLEASH_API_TOKEN}
+      # Sourcegraph
+      - SRC_ENDPOINT=${SRC_ENDPOINT:-http://sourcegraph:7080}
+      - SRC_ACCESS_TOKEN=${SRC_ACCESS_TOKEN}
+      # Huly (self-hosted project management)
+      - HULY_URL=http://host.docker.internal:8087
+      - HULY_EMAIL=${HULY_EMAIL}
+      - HULY_PASSWORD=${HULY_PASSWORD}
+      - HULY_WORKSPACE=${HULY_WORKSPACE}
+      # Internal
+      - TOOLSHED_URL=http://localhost:8081
+    volumes:
+      - toolshed-data:/root/.toolshed/data
+      - toolshed-audit:/root/.toolshed/audit
+      - toolshed-cache:/root/.toolshed/cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ============================================================
+  # GitLab CE — code hosting
+  # ============================================================
+
+  gitlab:
+    image: gitlab/gitlab-ce:18.8.2-ce.0
+    hostname: gitlab.local
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab'
+        puma['worker_processes'] = 2
+        sidekiq['concurrency'] = 5
+        registry_external_url 'http://gitlab:5050'
+        gitlab_rails['registry_enabled'] = true
+        registry['enable'] = true
+        registry_nginx['listen_port'] = 5050
+        registry_nginx['listen_https'] = false
+    ports:
+      - "80:80"
+      - "443:443"
+      - "2222:22"
+      - "5050:5050"
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    restart: unless-stopped
+
+  # ============================================================
+  # Sourcegraph — code search & intelligence
+  # ============================================================
+
+  sourcegraph:
+    image: sourcegraph/server:6.10.3349
+    ports:
+      - "7080:7080"
+    volumes:
+      - ~/.sourcegraph/config:/etc/sourcegraph
+      - ~/.sourcegraph/data:/var/opt/sourcegraph
+      - ~/.sourcegraph-config/gitconfig:/etc/gitconfig:ro
+    restart: unless-stopped
+
+volumes:
+  toolshed-data:
+  toolshed-audit:
+  toolshed-cache:
+  gitlab-config:
+  gitlab-logs:
+  gitlab-data:

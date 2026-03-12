@@ -1,0 +1,42 @@
+[tools]
+node = "22"
+
+# Rust crates
+"cargo:cargo-mcp" = "latest"
+"cargo:narsil-mcp" = "latest"
+"cargo:pmat" = "latest"
+"cargo:flamegraph" = "latest"
+
+# npm MCP servers
+"npm:@modelcontextprotocol/server-brave-search" = "latest"
+"npm:test-coverage-mcp" = "latest"
+"npm:@e2b/mcp-server" = "latest"
+"npm:@eslint/mcp" = "latest"
+"npm:@modelcontextprotocol/server-filesystem" = "latest"
+"npm:@mseep/git-mcp-server" = "latest"
+"npm:@alosies/gitlab-mcp-server" = "latest"
+"npm:@modelcontextprotocol/server-memory" = "latest"
+"npm:@playwright/mcp" = "latest"
+"npm:@henkey/postgres-mcp-server" = "latest"
+"npm:dkmaker-mcp-rest-api" = "latest"
+"npm:@modelcontextprotocol/server-sequential-thinking" = "latest"
+"npm:@ylin6/unleash-ff-mcp-server" = "latest"
+"npm:@fredko/vault-mcp-server" = "latest"
+"npm:agent-browser" = "latest"
+"npm:dev3000" = "latest"
+"npm:@firfi/huly-mcp" = "latest"
+
+# Python CLI tools
+"pipx:mcp-server-fetch" = "latest"
+"pipx:codepathfinder" = "latest"
+"pipx:redis-mcp-server" = "latest"
+"pipx:mcp-server-time" = "latest"
+"pipx:scrapling" = { version = "latest", extras = "all", uvx_args = "--with click --with mcp --with fastmcp" }
+"pipx:semgrep" = "latest"
+"pipx:git+https://github.com/MarcusJellinghaus/mcp-code-checker.git" = "latest"
+"pipx:cookiecutter" = "latest"
+"pipx:gitingest" = "latest"
+
+# GitHub releases
+"github:aquasecurity/trivy" = "latest"
+"github:jj-vcs/jj" = "latest"
