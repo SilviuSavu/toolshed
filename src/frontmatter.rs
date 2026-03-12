@@ -64,9 +64,7 @@ pub fn parse(content: &str) -> Result<(BTreeMap<String, String>, String), Toolsh
 
 fn strip_quotes(s: &str) -> String {
     if s.len() >= 2 {
-        if (s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\''))
-        {
+        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
             return s[1..s.len() - 1].to_string();
         }
     }

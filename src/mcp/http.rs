@@ -23,7 +23,11 @@ pub async fn call_tool(
 
     // Step 1: Initialize
     let init_params = InitializeParams::default_params();
-    let init_req = JsonRpcRequest::new(1, "initialize", Some(serde_json::to_value(init_params).unwrap()));
+    let init_req = JsonRpcRequest::new(
+        1,
+        "initialize",
+        Some(serde_json::to_value(init_params).unwrap()),
+    );
     let init_resp = send_rpc(&client, url, &headers, &init_req, &tool.manifest.name).await?;
 
     // Extract session ID if present
@@ -37,9 +41,7 @@ pub async fn call_tool(
 
     // Step 2: Send initialized notification
     let init_notif = JsonRpcNotification::new("notifications/initialized", None);
-    let mut notif_builder = client
-        .post(url)
-        .json(&init_notif);
+    let mut notif_builder = client.post(url).json(&init_notif);
     for (k, v) in &headers {
         notif_builder = notif_builder.header(k, v);
     }
@@ -67,10 +69,13 @@ pub async fn call_tool(
         req_builder = req_builder.header("mcp-session-id", sid);
     }
 
-    let resp = req_builder.send().await.map_err(|e| ToolshedError::McpHttpError {
-        tool: tool.manifest.name.clone(),
-        reason: e.to_string(),
-    })?;
+    let resp = req_builder
+        .send()
+        .await
+        .map_err(|e| ToolshedError::McpHttpError {
+            tool: tool.manifest.name.clone(),
+            reason: e.to_string(),
+        })?;
 
     let rpc_resp: JsonRpcResponse = parse_json_response(resp, &tool.manifest.name).await?;
 
@@ -82,10 +87,12 @@ pub async fn call_tool(
         });
     }
 
-    let result_val = rpc_resp.result.ok_or_else(|| ToolshedError::McpBadResponse {
-        tool: tool.manifest.name.clone(),
-        reason: "no result in tools/call response".to_string(),
-    })?;
+    let result_val = rpc_resp
+        .result
+        .ok_or_else(|| ToolshedError::McpBadResponse {
+            tool: tool.manifest.name.clone(),
+            reason: "no result in tools/call response".to_string(),
+        })?;
 
     let call_result: ToolCallResult =
         serde_json::from_value(result_val).map_err(|e| ToolshedError::McpBadResponse {
@@ -130,7 +137,11 @@ pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
 
     // Initialize
     let init_params = InitializeParams::default_params();
-    let init_req = JsonRpcRequest::new(1, "initialize", Some(serde_json::to_value(init_params).unwrap()));
+    let init_req = JsonRpcRequest::new(
+        1,
+        "initialize",
+        Some(serde_json::to_value(init_params).unwrap()),
+    );
     let init_resp = send_rpc(&client, url, &headers, &init_req, &tool.manifest.name).await?;
 
     let session_id = init_resp
@@ -158,9 +169,7 @@ pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
     let mut req_id = 2u64;
 
     loop {
-        let params = cursor
-            .as_ref()
-            .map(|c| serde_json::json!({ "cursor": c }));
+        let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
         let list_req = JsonRpcRequest::new(req_id, "tools/list", params);
         req_id += 1;
 
@@ -172,10 +181,13 @@ pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
             req_builder = req_builder.header("mcp-session-id", sid);
         }
 
-        let resp = req_builder.send().await.map_err(|e| ToolshedError::McpHttpError {
-            tool: tool.manifest.name.clone(),
-            reason: e.to_string(),
-        })?;
+        let resp = req_builder
+            .send()
+            .await
+            .map_err(|e| ToolshedError::McpHttpError {
+                tool: tool.manifest.name.clone(),
+                reason: e.to_string(),
+            })?;
 
         let rpc_resp: JsonRpcResponse = parse_json_response(resp, &tool.manifest.name).await?;
 
@@ -187,10 +199,12 @@ pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
             });
         }
 
-        let result_val = rpc_resp.result.ok_or_else(|| ToolshedError::McpBadResponse {
-            tool: tool.manifest.name.clone(),
-            reason: "no result in tools/list response".to_string(),
-        })?;
+        let result_val = rpc_resp
+            .result
+            .ok_or_else(|| ToolshedError::McpBadResponse {
+                tool: tool.manifest.name.clone(),
+                reason: "no result in tools/list response".to_string(),
+            })?;
 
         let list: ToolsListResult =
             serde_json::from_value(result_val).map_err(|e| ToolshedError::McpBadResponse {
@@ -220,10 +234,13 @@ async fn send_rpc(
         builder = builder.header(k, v);
     }
 
-    builder.send().await.map_err(|e| ToolshedError::McpHttpError {
-        tool: tool_name.to_string(),
-        reason: e.to_string(),
-    })
+    builder
+        .send()
+        .await
+        .map_err(|e| ToolshedError::McpHttpError {
+            tool: tool_name.to_string(),
+            reason: e.to_string(),
+        })
 }
 
 async fn parse_json_response(

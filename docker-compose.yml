@@ -7,8 +7,8 @@ services:
       - "8081:8081"
     environment:
       # Vault (secrets store)
-      - VAULT_ADDR=${VAULT_ADDR:-http://host.docker.internal:8200}
-      - VAULT_TOKEN=${VAULT_TOKEN:-toolshed-dev-token}
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN}
       # GitLab
       - GITLAB_TOKEN=${GITLAB_TOKEN}
       - GITLAB_BASE_URL=${GITLAB_BASE_URL:-http://gitlab}
@@ -35,8 +35,27 @@ services:
       - toolshed-data:/root/.toolshed/data
       - toolshed-audit:/root/.toolshed/audit
       - toolshed-cache:/root/.toolshed/cache
+      - ./tools/vault/tool.json:/root/.toolshed/tools/vault/tool.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ============================================================
+  # Vault — secrets management
+  # ============================================================
+
+  vault:
+    image: hashicorp/vault:1.18
+    command: vault server -config=/vault/config/config.hcl
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_ADDR: http://127.0.0.1:8200
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault-data:/vault/file
+      - ./vault/config.hcl:/vault/config/config.hcl:ro
     restart: unless-stopped
 
   # ============================================================
@@ -88,3 +107,4 @@ volumes:
   gitlab-config:
   gitlab-logs:
   gitlab-data:
+  vault-data:

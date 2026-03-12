@@ -182,7 +182,7 @@ impl ToolManifest {
             ToolType::Native => {
                 if self.commands.is_empty() {
                     return Err(err(
-                        "native tools must have at least one command".to_string(),
+                        "native tools must have at least one command".to_string()
                     ));
                 }
                 if self.mcp.is_some() {
@@ -198,9 +198,7 @@ impl ToolManifest {
                 match mcp.transport {
                     McpTransport::Stdio => {
                         if mcp.command.is_none() {
-                            return Err(err(
-                                "MCP stdio transport requires 'command'".to_string()
-                            ));
+                            return Err(err("MCP stdio transport requires 'command'".to_string()));
                         }
                     }
                     McpTransport::Http => {

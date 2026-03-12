@@ -21,12 +21,8 @@ pub async fn run(
     let arguments = parse_mcp_args(args)?;
 
     match mcp_cfg.transport {
-        McpTransport::Stdio => {
-            mcp::stdio::call_tool(tool, command, arguments, timeout).await
-        }
-        McpTransport::Http => {
-            mcp::http::call_tool(tool, command, arguments, timeout).await
-        }
+        McpTransport::Stdio => mcp::stdio::call_tool(tool, command, arguments, timeout).await,
+        McpTransport::Http => mcp::http::call_tool(tool, command, arguments, timeout).await,
     }
 }
 

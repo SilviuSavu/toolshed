@@ -110,23 +110,26 @@ impl McpStdioSession {
                 tool: self.tool_name.clone(),
                 reason: e.to_string(),
             })?;
-        self.stdin.flush().await.map_err(|e| ToolshedError::McpSpawnFailed {
-            tool: self.tool_name.clone(),
-            reason: e.to_string(),
-        })?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|e| ToolshedError::McpSpawnFailed {
+                tool: self.tool_name.clone(),
+                reason: e.to_string(),
+            })?;
         Ok(())
     }
 
     async fn read_line(&mut self) -> Result<String, ToolshedError> {
         let mut line = String::new();
-        let n = self
-            .reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| ToolshedError::McpBadResponse {
-                tool: self.tool_name.clone(),
-                reason: e.to_string(),
-            })?;
+        let n =
+            self.reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| ToolshedError::McpBadResponse {
+                    tool: self.tool_name.clone(),
+                    reason: e.to_string(),
+                })?;
         if n == 0 {
             return Err(ToolshedError::McpCrashed {
                 tool: self.tool_name.clone(),
@@ -150,9 +153,7 @@ pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
     let mut cursor: Option<String> = None;
 
     loop {
-        let params = cursor
-            .as_ref()
-            .map(|c| serde_json::json!({ "cursor": c }));
+        let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
         let result = session.send_request("tools/list", params).await?;
         let list: ToolsListResult =
             serde_json::from_value(result).map_err(|e| ToolshedError::McpBadResponse {
@@ -186,10 +187,7 @@ pub async fn call_tool(
     };
 
     let result = session
-        .send_request(
-            "tools/call",
-            Some(serde_json::to_value(params).unwrap()),
-        )
+        .send_request("tools/call", Some(serde_json::to_value(params).unwrap()))
         .await?;
 
     let call_result: ToolCallResult =

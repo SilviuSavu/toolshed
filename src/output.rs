@@ -16,7 +16,11 @@ pub fn truncate(input: &str, max_chars: usize) -> String {
 
     // Try to find a newline in the last 20% of the budget for cleaner cut
     let search_start = max_chars - (max_chars / 5);
-    let search_region: String = input.chars().skip(search_start).take(max_chars - search_start).collect();
+    let search_region: String = input
+        .chars()
+        .skip(search_start)
+        .take(max_chars - search_start)
+        .collect();
 
     let cut_point = if let Some(nl_pos) = search_region.rfind('\n') {
         // Found a newline — cut there
@@ -40,7 +44,13 @@ fn is_binary(input: &str) -> bool {
     }
     let non_printable = sample
         .iter()
-        .filter(|c| !c.is_ascii_graphic() && !c.is_ascii_whitespace() && **c != '\n' && **c != '\r' && **c != '\t')
+        .filter(|c| {
+            !c.is_ascii_graphic()
+                && !c.is_ascii_whitespace()
+                && **c != '\n'
+                && **c != '\r'
+                && **c != '\t'
+        })
         .count();
     let ratio = non_printable as f64 / sample.len() as f64;
     ratio > 0.1

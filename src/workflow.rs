@@ -85,20 +85,17 @@ fn load_workflow(dir: &PathBuf, dir_name: &str) -> Result<Workflow, ToolshedErro
         });
     }
 
-    let content =
-        std::fs::read_to_string(&wf_md).map_err(|e| ToolshedError::BadWorkflow {
-            workflow: dir_name.to_string(),
-            reason: format!("cannot read WORKFLOW.md: {e}"),
-        })?;
+    let content = std::fs::read_to_string(&wf_md).map_err(|e| ToolshedError::BadWorkflow {
+        workflow: dir_name.to_string(),
+        reason: format!("cannot read WORKFLOW.md: {e}"),
+    })?;
 
     let (meta, body) = frontmatter::parse(&content)?;
 
-    let name = meta
-        .get("name")
-        .ok_or_else(|| ToolshedError::BadWorkflow {
-            workflow: dir_name.to_string(),
-            reason: "frontmatter missing 'name'".to_string(),
-        })?;
+    let name = meta.get("name").ok_or_else(|| ToolshedError::BadWorkflow {
+        workflow: dir_name.to_string(),
+        reason: "frontmatter missing 'name'".to_string(),
+    })?;
 
     let description = meta
         .get("description")
@@ -119,10 +116,7 @@ fn load_workflow(dir: &PathBuf, dir_name: &str) -> Result<Workflow, ToolshedErro
     if !manifest::is_valid_name(name) {
         return Err(ToolshedError::BadWorkflow {
             workflow: dir_name.to_string(),
-            reason: format!(
-                "name must be 1-64 chars, [a-z0-9_-] only, got '{}'",
-                name
-            ),
+            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{}'", name),
         });
     }
 
@@ -229,10 +223,7 @@ pub fn parse_steps(body: &str, workflow_name: &str) -> Result<Vec<Step>, Toolshe
         if tokens.len() < 2 {
             return Err(ToolshedError::BadWorkflow {
                 workflow: workflow_name.to_string(),
-                reason: format!(
-                    "line {}: step must have at least a tool and command",
-                    i + 1
-                ),
+                reason: format!("line {}: step must have at least a tool and command", i + 1),
             });
         }
 
@@ -279,10 +270,8 @@ pub async fn execute(
         }
 
         // Substitute ${prev} in tool, command, and args, then env interpolate
-        let tool_name =
-            crate::env::interpolate(&substitute_prev(&step.tool, &prev))?;
-        let command =
-            crate::env::interpolate(&substitute_prev(&step.command, &prev))?;
+        let tool_name = crate::env::interpolate(&substitute_prev(&step.tool, &prev))?;
+        let command = crate::env::interpolate(&substitute_prev(&step.command, &prev))?;
         let args: Vec<String> = step
             .args
             .iter()
@@ -292,15 +281,16 @@ pub async fn execute(
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let tool = reg.tools.get(&tool_name).ok_or_else(|| {
-            ToolshedError::WorkflowStepFailed {
+        let tool = reg
+            .tools
+            .get(&tool_name)
+            .ok_or_else(|| ToolshedError::WorkflowStepFailed {
                 workflow: workflow.manifest.name.clone(),
                 step: i + 1,
                 tool: tool_name.clone(),
                 command: command.clone(),
                 reason: format!("tool '{}' not found", tool_name),
-            }
-        })?;
+            })?;
 
         let step_timeout = Some(remaining.as_secs());
 
@@ -320,10 +310,7 @@ pub async fn execute(
                 let output = if full {
                     output
                 } else {
-                    crate::output::truncate(
-                        &output,
-                        tool.manifest.max_output,
-                    )
+                    crate::output::truncate(&output, tool.manifest.max_output)
                 };
                 if verbose {
                     eprint!("{output}");
@@ -436,7 +423,10 @@ mod tests {
 
     #[test]
     fn substitute_prev_works() {
-        assert_eq!(substitute_prev("hello ${prev} world", "foo"), "hello foo world");
+        assert_eq!(
+            substitute_prev("hello ${prev} world", "foo"),
+            "hello foo world"
+        );
         assert_eq!(substitute_prev("no var", "foo"), "no var");
     }
 }

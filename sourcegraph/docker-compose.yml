@@ -1,0 +1,15 @@
+services:
+  sourcegraph:
+    image: sourcegraph/server:6.10.3349
+    ports:
+      - "7080:7080"
+    volumes:
+      - ~/.sourcegraph/config:/etc/sourcegraph
+      - ~/.sourcegraph/data:/var/opt/sourcegraph
+      - ~/.sourcegraph-config/gitconfig:/etc/gitconfig:ro
+    restart: unless-stopped
+
+networks:
+  default:
+    external: true
+    name: infra

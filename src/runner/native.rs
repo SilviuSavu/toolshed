@@ -70,11 +70,7 @@ pub async fn run(
                 Err(ToolshedError::ToolFailed {
                     tool: manifest.name.clone(),
                     code,
-                    stderr: if stderr.is_empty() {
-                        stdout
-                    } else {
-                        stderr
-                    },
+                    stderr: if stderr.is_empty() { stdout } else { stderr },
                 })
             }
         }

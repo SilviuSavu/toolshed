@@ -95,7 +95,8 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
                 if let Ok(meta) = std::fs::metadata(&entry.path()) {
                     let mode = meta.permissions().mode();
                     if mode & 0o111 != 0 {
-                        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode));
+                        let _ =
+                            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode));
                     }
                 }
             }
@@ -353,7 +354,9 @@ fn skill_list() {
         .assert()
         .success()
         .stdout(predicate::str::contains("test-skill"))
-        .stdout(predicate::str::contains("A test skill for integration testing"));
+        .stdout(predicate::str::contains(
+            "A test skill for integration testing",
+        ));
 }
 
 #[test]
@@ -409,7 +412,9 @@ fn agent_list() {
         .assert()
         .success()
         .stdout(predicate::str::contains("test-agent"))
-        .stdout(predicate::str::contains("A test agent for integration testing"))
+        .stdout(predicate::str::contains(
+            "A test agent for integration testing",
+        ))
         .stdout(predicate::str::contains("[sonnet]"));
 }
 
@@ -468,7 +473,9 @@ fn rule_list() {
         .stdout(predicate::str::contains("test-rule"))
         .stdout(predicate::str::contains("guardrail"))
         .stdout(predicate::str::contains("error"))
-        .stdout(predicate::str::contains("A test rule for integration testing"));
+        .stdout(predicate::str::contains(
+            "A test rule for integration testing",
+        ));
 }
 
 #[test]

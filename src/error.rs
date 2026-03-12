@@ -96,10 +96,7 @@ pub enum ToolshedError {
     },
 
     #[error("workflow '{workflow}' timed out after {timeout_secs}s")]
-    WorkflowTimeout {
-        workflow: String,
-        timeout_secs: u64,
-    },
+    WorkflowTimeout { workflow: String, timeout_secs: u64 },
 
     #[error("audit chain broken: {message}")]
     AuditChainBroken { message: String },
@@ -145,8 +142,7 @@ impl ToolshedError {
             | Self::BadRule { .. }
             | Self::BadWorkflow { .. } => 3,
 
-            Self::ToolTimeout { .. }
-            | Self::WorkflowTimeout { .. } => 4,
+            Self::ToolTimeout { .. } | Self::WorkflowTimeout { .. } => 4,
 
             Self::AuditChainBroken { .. } | Self::EnvVarNotSet { .. } => 5,
 

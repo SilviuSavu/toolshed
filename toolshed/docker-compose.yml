@@ -1,0 +1,55 @@
+services:
+  toolshed:
+    image: docker-toolshed
+    ports:
+      - "8081:8081"
+    environment:
+      # Vault (secrets store)
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN}
+      # GitLab
+      - GITLAB_TOKEN=${GITLAB_TOKEN}
+      - GITLAB_BASE_URL=${GITLAB_BASE_URL:-http://gitlab}
+      # Search APIs
+      - BRAVE_API_KEY=${BRAVE_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DEEPINFRA_API_KEY=${DEEPINFRA_API_KEY}
+      # Infrastructure
+      - DATABASE_URI=${DATABASE_URI:-postgresql://host.docker.internal:5432}
+      - QDRANT_URL=${QDRANT_URL:-http://host.docker.internal:6333}
+      - E2B_API_KEY=${E2B_API_KEY}
+      - UNLEASH_API_TOKEN=${UNLEASH_API_TOKEN}
+      # Sourcegraph
+      - SRC_ENDPOINT=${SRC_ENDPOINT:-http://sourcegraph:7080}
+      - SRC_ACCESS_TOKEN=${SRC_ACCESS_TOKEN}
+      # Huly (self-hosted project management)
+      - HULY_URL=http://host.docker.internal:8087
+      - HULY_EMAIL=${HULY_EMAIL}
+      - HULY_PASSWORD=${HULY_PASSWORD}
+      - HULY_WORKSPACE=${HULY_WORKSPACE}
+      # Internal
+      - TOOLSHED_URL=http://localhost:8081
+    volumes:
+      - toolshed-data:/root/.toolshed/data
+      - toolshed-audit:/root/.toolshed/audit
+      - toolshed-cache:/root/.toolshed/cache
+      - ../tools/vault/tool.json:/root/.toolshed/tools/vault/tool.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+networks:
+  default:
+    external: true
+    name: infra
+
+volumes:
+  toolshed-data:
+    external: true
+    name: docker_toolshed-data
+  toolshed-audit:
+    external: true
+    name: docker_toolshed-audit
+  toolshed-cache:
+    external: true
+    name: docker_toolshed-cache

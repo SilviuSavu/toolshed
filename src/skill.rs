@@ -103,10 +103,7 @@ fn load_skill(dir: &PathBuf, dir_name: &str) -> Result<Skill, ToolshedError> {
     if !manifest::is_valid_name(name) {
         return Err(ToolshedError::BadSkill {
             skill: dir_name.to_string(),
-            reason: format!(
-                "name must be 1-64 chars, [a-z0-9_-] only, got '{}'",
-                name
-            ),
+            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{}'", name),
         });
     }
 

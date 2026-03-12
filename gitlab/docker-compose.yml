@@ -1,0 +1,40 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:18.8.2-ce.0
+    hostname: gitlab.local
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab'
+        puma['worker_processes'] = 2
+        sidekiq['concurrency'] = 5
+        registry_external_url 'http://gitlab:5050'
+        gitlab_rails['registry_enabled'] = true
+        registry['enable'] = true
+        registry_nginx['listen_port'] = 5050
+        registry_nginx['listen_https'] = false
+    ports:
+      - "80:80"
+      - "443:443"
+      - "2222:22"
+      - "5050:5050"
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    restart: unless-stopped
+
+networks:
+  default:
+    external: true
+    name: infra
+
+volumes:
+  gitlab-config:
+    external: true
+    name: docker_gitlab-config
+  gitlab-logs:
+    external: true
+    name: docker_gitlab-logs
+  gitlab-data:
+    external: true
+    name: docker_gitlab-data

@@ -21,10 +21,16 @@ use cli::{Cli, Command};
 use error::ToolshedError;
 use std::process;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: failed to create tokio runtime: {e}");
+            process::exit(1);
+        }
+    };
     let cli = Cli::parse();
-    if let Err(e) = run(cli).await {
+    if let Err(e) = rt.block_on(run(cli)) {
         let code = e.exit_code();
         eprintln!("error: {e}");
         process::exit(code);
@@ -33,12 +39,8 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), ToolshedError> {
     match cli.command {
-        Command::List { category, health } => {
-            cmd_list(category, health).await
-        }
-        Command::Help { tool, command } => {
-            cmd_help(&tool, command.as_deref()).await
-        }
+        Command::List { category, health } => cmd_list(category, health).await,
+        Command::Help { tool, command } => cmd_help(&tool, command.as_deref()).await,
         Command::Run {
             tool,
             command,
@@ -93,10 +95,7 @@ async fn cmd_list(category: Option<String>, show_health: bool) -> Result<(), Too
             }
             let tool_word = if total == 1 { "tool" } else { "tools" };
             if unconfigured == total {
-                println!(
-                    "{:<20} {total} {tool_word}  (health not configured)",
-                    cat
-                );
+                println!("{:<20} {total} {tool_word}  (health not configured)", cat);
             } else {
                 let parts: Vec<String> = [
                     (up > 0).then(|| format!("{up} up")),
@@ -105,11 +104,7 @@ async fn cmd_list(category: Option<String>, show_health: bool) -> Result<(), Too
                 .into_iter()
                 .flatten()
                 .collect();
-                println!(
-                    "{:<20} {total} {tool_word}  ({})",
-                    cat,
-                    parts.join(", ")
-                );
+                println!("{:<20} {total} {tool_word}  ({})", cat, parts.join(", "));
             }
         }
     } else {
@@ -165,16 +160,8 @@ async fn print_native_help(
     println!();
     println!("Commands:");
     for (cmd_name, cmd) in &m.commands {
-        let positionals: Vec<_> = cmd
-            .args
-            .iter()
-            .filter(|(_, a)| a.positional)
-            .collect();
-        let flags: Vec<_> = cmd
-            .args
-            .iter()
-            .filter(|(_, a)| !a.positional)
-            .collect();
+        let positionals: Vec<_> = cmd.args.iter().filter(|(_, a)| a.positional).collect();
+        let flags: Vec<_> = cmd.args.iter().filter(|(_, a)| !a.positional).collect();
 
         let pos_str: String = positionals
             .iter()
@@ -230,9 +217,12 @@ async fn print_native_help(
 
 async fn print_mcp_help(tool: &registry::Tool) -> Result<(), ToolshedError> {
     let m = &tool.manifest;
-    let mcp_cfg = m.mcp.as_ref().ok_or_else(|| ToolshedError::MissingMcpConfig {
-        tool: m.name.clone(),
-    })?;
+    let mcp_cfg = m
+        .mcp
+        .as_ref()
+        .ok_or_else(|| ToolshedError::MissingMcpConfig {
+            tool: m.name.clone(),
+        })?;
 
     println!("{} — {}", m.name, m.description);
     println!("Type: mcp ({})", mcp_cfg.transport);
@@ -249,14 +239,24 @@ async fn print_mcp_help(tool: &registry::Tool) -> Result<(), ToolshedError> {
             println!("    {desc}");
         }
         for param in &mcp_tool.params {
-            let req = if param.required { "required" } else { "optional" };
+            let req = if param.required {
+                "required"
+            } else {
+                "optional"
+            };
             let desc = param.description.as_deref().unwrap_or("");
-            println!("    {:<16} {}, {req} — {desc}", param.name, param.param_type);
+            println!(
+                "    {:<16} {}, {req} — {desc}",
+                param.name, param.param_type
+            );
         }
         println!();
     }
 
-    println!("Usage: toolshed run {} <tool_name> [--arg value ...]", m.name);
+    println!(
+        "Usage: toolshed run {} <tool_name> [--arg value ...]",
+        m.name
+    );
 
     Ok(())
 }
@@ -695,7 +695,7 @@ async fn cmd_agent_prompt(format: &str) -> Result<(), ToolshedError> {
     let tool_table = tool_lines.join("\n");
 
     let prompt = format!(
-        r#"# Toolshed Agent
+        r"# Toolshed Agent
 
 You have access to Toolshed, a universal tool registry that provides a consistent interface to native CLI tools and MCP servers.
 
@@ -728,7 +728,7 @@ toolshed run <tool> <command> [args...]
 
 - **Always discover before using.** Run `toolshed help <tool>` to see exact parameters.
 - **Tools are stateless between calls.** Each `toolshed run` is independent.
-- **Environment variables** are interpolated at runtime from the shell environment."#
+- **Environment variables** are interpolated at runtime from the shell environment."
     );
 
     // Append skills section if any
@@ -742,7 +742,8 @@ toolshed run <tool> <command> [args...]
         for (name, s) in &skill_reg.skills {
             lines.push(format!("| {:<22} | {} |", name, s.manifest.description));
         }
-        lines.push("\nUse `toolshed skill show <name>` to read a skill's full content.".to_string());
+        lines
+            .push("\nUse `toolshed skill show <name>` to read a skill's full content.".to_string());
         lines.join("\n")
     };
 
@@ -756,9 +757,14 @@ toolshed run <tool> <command> [args...]
         lines.push("|------------------------|-------------|-------|".to_string());
         for (name, a) in &agent_reg.agents {
             let model = a.manifest.model.as_deref().unwrap_or("-");
-            lines.push(format!("| {:<22} | {} | {} |", name, a.manifest.description, model));
+            lines.push(format!(
+                "| {:<22} | {} | {} |",
+                name, a.manifest.description, model
+            ));
         }
-        lines.push("\nUse `toolshed agent show <name>` to read an agent's system prompt.".to_string());
+        lines.push(
+            "\nUse `toolshed agent show <name>` to read an agent's system prompt.".to_string(),
+        );
         lines.join("\n")
     };
 
@@ -801,13 +807,16 @@ toolshed run <tool> <command> [args...]
         lines.join("\n")
     };
 
-    let prompt = format!("{prompt}{skills_section}{agents_section}{rules_section}{workflows_section}");
+    let prompt =
+        format!("{prompt}{skills_section}{agents_section}{rules_section}{workflows_section}");
 
     match format {
         "skill" => {
             println!("---");
             println!("name: toolshed");
-            println!("description: Universal tool registry — discover and run CLI tools and MCP servers");
+            println!(
+                "description: Universal tool registry — discover and run CLI tools and MCP servers"
+            );
             println!("user_invocable: true");
             println!("---");
             println!();
@@ -821,10 +830,7 @@ toolshed run <tool> <command> [args...]
     Ok(())
 }
 
-async fn cmd_audit(
-    action: cli::AuditAction,
-    own_audit_trail: bool,
-) -> Result<(), ToolshedError> {
+async fn cmd_audit(action: cli::AuditAction, own_audit_trail: bool) -> Result<(), ToolshedError> {
     if !own_audit_trail {
         return cmd_audit_exec(action).await;
     }
@@ -923,7 +929,10 @@ async fn cmd_audit_exec(action: cli::AuditAction) -> Result<(), ToolshedError> {
         cli::AuditAction::Verify { session } => {
             let files = audit::list_files(&dir);
             let to_verify: Vec<_> = if let Some(ref sid) = session {
-                files.into_iter().filter(|f| f.session_id.contains(sid)).collect()
+                files
+                    .into_iter()
+                    .filter(|f| f.session_id.contains(sid))
+                    .collect()
             } else {
                 files
             };
@@ -967,7 +976,10 @@ async fn cmd_audit_exec(action: cli::AuditAction) -> Result<(), ToolshedError> {
         } => {
             let files = audit::list_files(&dir);
             let to_query: Vec<_> = if let Some(ref sid) = session {
-                files.into_iter().filter(|f| f.session_id.contains(sid)).collect()
+                files
+                    .into_iter()
+                    .filter(|f| f.session_id.contains(sid))
+                    .collect()
             } else {
                 files
             };

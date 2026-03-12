@@ -54,10 +54,9 @@ impl Registry {
 
             let manifest_path = path.join("tool.json");
             if !manifest_path.exists() {
-                registry.errors.push((
-                    dir_name.clone(),
-                    "missing tool.json".to_string(),
-                ));
+                registry
+                    .errors
+                    .push((dir_name.clone(), "missing tool.json".to_string()));
                 continue;
             }
 
@@ -69,10 +68,9 @@ impl Registry {
                     match manifest.tool_type {
                         crate::manifest::ToolType::Native => {
                             if !has_run {
-                                registry.errors.push((
-                                    dir_name.clone(),
-                                    "missing 'run' script".to_string(),
-                                ));
+                                registry
+                                    .errors
+                                    .push((dir_name.clone(), "missing 'run' script".to_string()));
                                 continue;
                             }
 

@@ -1,0 +1,18 @@
+{
+  "name": "vault",
+  "description": "Secrets management: read/write secrets, rotate credentials, manage policies",
+  "category": "secrets",
+  "type": "mcp",
+  "max_output": 4096,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@fredko/vault-mcp-server"],
+    "env": {
+      "VAULT_ADDR": "${VAULT_ADDR}",
+      "VAULT_TOKEN": "${VAULT_TOKEN}",
+      "VAULT_ALLOW_WRITE": "true"
+    }
+  },
+  "health": "curl -sf ${VAULT_ADDR}/v1/sys/health"
+}

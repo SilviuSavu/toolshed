@@ -106,10 +106,7 @@ fn load_agent(dir: &PathBuf, dir_name: &str) -> Result<Agent, ToolshedError> {
     if !manifest::is_valid_name(name) {
         return Err(ToolshedError::BadAgent {
             agent: dir_name.to_string(),
-            reason: format!(
-                "name must be 1-64 chars, [a-z0-9_-] only, got '{}'",
-                name
-            ),
+            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{}'", name),
         });
     }
 

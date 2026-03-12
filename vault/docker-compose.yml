@@ -1,0 +1,24 @@
+services:
+  vault:
+    image: hashicorp/vault:1.18
+    command: vault server -config=/vault/config/config.hcl
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_ADDR: http://127.0.0.1:8200
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault-data:/vault/file
+      - ./config.hcl:/vault/config/config.hcl:ro
+    restart: unless-stopped
+
+networks:
+  default:
+    external: true
+    name: infra
+
+volumes:
+  vault-data:
+    external: true
+    name: docker_vault-data

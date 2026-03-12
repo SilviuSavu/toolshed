@@ -1,8 +1,6 @@
 use crate::error::ToolshedError;
 use crate::manifest::{ArgType, ToolType};
-use crate::mcp::protocol::{
-    ContentItem, McpToolDef, ToolCallResult, MCP_PROTOCOL_VERSION,
-};
+use crate::mcp::protocol::{ContentItem, McpToolDef, ToolCallResult, MCP_PROTOCOL_VERSION};
 use crate::registry::{Registry, Tool};
 use crate::{mcp, runner};
 use axum::body::Body;
@@ -84,10 +82,7 @@ struct AppState {
 
 // ─── Build tool index ───────────────────────────────────────
 
-async fn build_tool_index(
-    registry: &Registry,
-    category_filter: Option<&str>,
-) -> Vec<ExposedTool> {
+async fn build_tool_index(registry: &Registry, category_filter: Option<&str>) -> Vec<ExposedTool> {
     let mut exposed = Vec::new();
 
     for (name, tool) in &registry.tools {
@@ -120,36 +115,31 @@ async fn build_tool_index(
                     });
                 }
             }
-            ToolType::Mcp => {
-                match mcp::introspect::get_raw_mcp_tool_defs(tool).await {
-                    Ok(defs) => {
-                        for mcp_def in defs {
-                            let namespaced = format!("{name}__{}", mcp_def.name);
-                            let mut schema = mcp_def.input_schema.clone();
-                            if let Some(ref mut s) = schema {
-                                sanitize_schema(s);
-                            }
-                            exposed.push(ExposedTool {
-                                namespaced_name: namespaced.clone(),
-                                def: McpToolDef {
-                                    name: namespaced,
-                                    description: mcp_def.description.clone(),
-                                    input_schema: schema,
-                                },
-                                tool_name: name.clone(),
-                                command_name: mcp_def.name,
-                                tool_type: ToolType::Mcp,
-                            });
+            ToolType::Mcp => match mcp::introspect::get_raw_mcp_tool_defs(tool).await {
+                Ok(defs) => {
+                    for mcp_def in defs {
+                        let namespaced = format!("{name}__{}", mcp_def.name);
+                        let mut schema = mcp_def.input_schema.clone();
+                        if let Some(ref mut s) = schema {
+                            sanitize_schema(s);
                         }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "warning: failed to introspect MCP tool '{}': {}",
-                            name, e
-                        );
+                        exposed.push(ExposedTool {
+                            namespaced_name: namespaced.clone(),
+                            def: McpToolDef {
+                                name: namespaced,
+                                description: mcp_def.description.clone(),
+                                input_schema: schema,
+                            },
+                            tool_name: name.clone(),
+                            command_name: mcp_def.name,
+                            tool_type: ToolType::Mcp,
+                        });
                     }
                 }
-            }
+                Err(e) => {
+                    eprintln!("warning: failed to introspect MCP tool '{}': {}", name, e);
+                }
+            },
         }
     }
 
@@ -287,11 +277,7 @@ async fn handle_sse(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
     // Register session
-    state
-        .sessions
-        .lock()
-        .await
-        .insert(session_id.clone(), tx);
+    state.sessions.lock().await.insert(session_id.clone(), tx);
 
     let sid = session_id.clone();
     let state_clone = state.clone();
@@ -371,21 +357,19 @@ async fn process_rpc(state: &AppState, req: IncomingJsonRpc) -> OutgoingJsonRpc 
     let id = req.id.clone();
 
     match req.method.as_str() {
-        "initialize" => {
-            OutgoingJsonRpc::result(
-                id,
-                serde_json::json!({
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
-                    "capabilities": {
-                        "tools": {}
-                    },
-                    "serverInfo": {
-                        "name": "toolshed",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }),
-            )
-        }
+        "initialize" => OutgoingJsonRpc::result(
+            id,
+            serde_json::json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "toolshed",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }),
+        ),
 
         "notifications/initialized" => {
             // Notification — no response needed, but we send one anyway
@@ -411,10 +395,7 @@ async fn process_rpc(state: &AppState, req: IncomingJsonRpc) -> OutgoingJsonRpc 
                 }
             };
 
-            let tool_name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let arguments = params
                 .get("arguments")
                 .cloned()
@@ -497,8 +478,7 @@ async fn dispatch_tool(
                         .await
                 }
                 crate::manifest::McpTransport::Http => {
-                    mcp::http::call_tool(tool, &exposed.command_name, arguments.clone(), None)
-                        .await
+                    mcp::http::call_tool(tool, &exposed.command_name, arguments.clone(), None).await
                 }
             }
         }

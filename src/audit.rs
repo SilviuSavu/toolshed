@@ -293,10 +293,7 @@ pub fn verify_file(path: &Path) -> IntegrityResult {
                 valid: false,
                 total_entries: entries.len(),
                 first_broken_seq: Some(entry.seq),
-                error_message: Some(format!(
-                    "Entry seq={}: prevHash mismatch",
-                    entry.seq
-                )),
+                error_message: Some(format!("Entry seq={}: prevHash mismatch", entry.seq)),
             };
         }
 
