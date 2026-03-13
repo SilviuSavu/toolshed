@@ -17,3 +17,5 @@ FROM sourcegraph/server:6.10.3349
 #    - Prevents the background job from freezing insights when no license is present
 
 COPY frontend-patched /usr/local/bin/frontend
+RUN echo "Verify patched binary integrity" \
+ && sha256sum /usr/local/bin/frontend

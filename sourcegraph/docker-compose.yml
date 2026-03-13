@@ -6,12 +6,20 @@ services:
     environment:
       - ALLOW_SINGLE_DOCKER_CODE_INSIGHTS=true
     volumes:
-      - ~/.sourcegraph/config:/etc/sourcegraph
-      - ~/.sourcegraph/data:/var/opt/sourcegraph
+      - sg-config:/etc/sourcegraph
+      - sg-data:/var/opt/sourcegraph
       - ~/.sourcegraph-config/gitconfig:/etc/gitconfig:ro
+    deploy:
+      resources:
+        limits:
+          memory: 4G
     restart: unless-stopped
 
 networks:
   default:
     external: true
     name: infra
+
+volumes:
+  sg-config:
+  sg-data:

@@ -1,3 +1,4 @@
+# DEPRECATED: Use the per-service compose files under docker/{gitlab,sourcegraph,toolshed,vault,huly,unleash}/ instead.
 services:
   toolshed:
     build:

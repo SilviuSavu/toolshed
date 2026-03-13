@@ -3,7 +3,7 @@ services:
     image: postgres:15-alpine
     environment:
       POSTGRES_USER: unleash
-      POSTGRES_PASSWORD: unleash
+      POSTGRES_PASSWORD: ${UNLEASH_DB_PASSWORD}
       POSTGRES_DB: unleash
     volumes:
       - unleash-db-data:/var/lib/postgresql/data
@@ -16,17 +16,21 @@ services:
 
   unleash:
     image: unleashorg/unleash-server:6
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     ports:
       - "4242:4242"
     depends_on:
       unleash-db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://unleash:unleash@unleash-db:5432/unleash
+      DATABASE_URL: postgresql://unleash:${UNLEASH_DB_PASSWORD}@unleash-db:5432/unleash
       DATABASE_SSL: "false"
       UNLEASH_DEFAULT_ADMIN_USERNAME: admin
-      UNLEASH_DEFAULT_ADMIN_PASSWORD: unleash
-      INIT_CLIENT_API_TOKENS: "default:development.toolshed-unleash-token"
+      UNLEASH_DEFAULT_ADMIN_PASSWORD: ${UNLEASH_ADMIN_PASSWORD}
+      INIT_CLIENT_API_TOKENS: "default:development.${UNLEASH_API_TOKEN}"
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:4242/health || exit 1"]
       interval: 10s

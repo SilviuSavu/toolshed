@@ -2,6 +2,10 @@ services:
   gitlab:
     image: gitlab/gitlab-ce:18.8.2-ce.0
     hostname: gitlab.local
+    deploy:
+      resources:
+        limits:
+          memory: 4G
     environment:
       GITLAB_OMNIBUS_CONFIG: |
         external_url 'http://gitlab'
@@ -29,7 +33,7 @@ services:
       - gitlab
     volumes:
       - gitlab-runner-config:/etc/gitlab-runner
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
 
 networks:
