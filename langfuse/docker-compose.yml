@@ -10,18 +10,12 @@ services:
       SALT: ${LANGFUSE_SALT:-changeme-generate-a-real-salt}
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: langfuse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: langfuse-redis
       REDIS_PORT: "6379"
       LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "false"
-      LANGFUSE_INIT_ORG_ID: orchestrator
-      LANGFUSE_INIT_ORG_NAME: Orchestrator
-      LANGFUSE_INIT_PROJECT_ID: orchestrator-prompts
-      LANGFUSE_INIT_PROJECT_NAME: Prompts
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-orchestrator}
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-orchestrator}
-      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@localhost}
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:-admin}
-      LANGFUSE_INIT_USER_NAME: Admin
     depends_on:
       langfuse-db:
         condition: service_healthy
@@ -52,11 +46,11 @@ services:
     image: clickhouse/clickhouse-server:24.6
     environment:
       CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_PASSWORD: langfuse
     volumes:
       - langfuse-ch-data:/var/lib/clickhouse
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      test: ["CMD-SHELL", "clickhouse-client --password langfuse --query 'SELECT 1'"]
       interval: 5s
       timeout: 3s
       retries: 10
