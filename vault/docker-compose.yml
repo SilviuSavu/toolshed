@@ -1,9 +1,13 @@
 services:
   vault:
     image: hashicorp/vault:1.18
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     command: vault server -config=/vault/config/config.hcl
     ports:
-      - "8200:8200"
+      - "127.0.0.1:8200:8200"
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
     cap_add:
