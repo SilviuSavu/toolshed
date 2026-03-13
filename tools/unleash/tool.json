@@ -1,0 +1,16 @@
+{
+  "name": "unleash",
+  "description": "Feature flags: list, create, enable, disable toggles",
+  "category": "infrastructure",
+  "type": "mcp",
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@ylin6/unleash-ff-mcp-server"],
+    "env": {
+      "UNLEASH_API_URL": "http://unleash:4242/api",
+      "UNLEASH_API_TOKEN": "${UNLEASH_API_TOKEN}"
+    }
+  },
+  "health": "curl -sf http://unleash:4242/health"
+}

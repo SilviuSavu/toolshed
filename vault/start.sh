@@ -19,6 +19,8 @@ curl -s -X POST http://127.0.0.1:8200/v1/sys/unseal \
 echo "vault: $(curl -s http://127.0.0.1:8200/v1/sys/health | grep -o '"sealed":false')"
 
 # Start remaining services
+docker compose -f "$DIR/langfuse/docker-compose.yml" up -d
+docker compose -f "$DIR/unleash/docker-compose.yml" up -d
 docker compose -f "$DIR/toolshed/docker-compose.yml" up -d
 docker compose -f "$DIR/gitlab/docker-compose.yml" up -d
 docker compose -f "$DIR/sourcegraph/docker-compose.yml" up -d

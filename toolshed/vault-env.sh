@@ -47,5 +47,8 @@ v=$(vault_get huly/credentials HULY_WORKSPACE); [ -n "$v" ] && export HULY_WORKS
 v=$(vault_get langfuse public_key); [ -n "$v" ] && export LANGFUSE_PUBLIC_KEY="$v"
 v=$(vault_get langfuse secret_key); [ -n "$v" ] && export LANGFUSE_SECRET_KEY="$v"
 
+# GitLab Runner
+v=$(vault_get gitlab runner_token); [ -n "$v" ] && export RUNNER_AUTH_TOKEN="$v"
+
 echo "vault-env: secrets resolved, starting application" >&2
 exec "$@"

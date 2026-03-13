@@ -31,9 +31,13 @@ services:
     image: gitlab/gitlab-runner:latest
     depends_on:
       - gitlab
+    environment:
+      - RUNNER_AUTH_TOKEN=${RUNNER_AUTH_TOKEN}
     volumes:
       - gitlab-runner-config:/etc/gitlab-runner
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./register-runner.sh:/register-runner.sh:ro
+    entrypoint: ["/bin/sh", "/register-runner.sh"]
     restart: unless-stopped
 
 networks:
