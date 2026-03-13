@@ -4,7 +4,7 @@ pub const DEFAULT_MAX_OUTPUT: usize = 4096;
 pub const DEFAULT_IDLE_TIMEOUT: u64 = 300;
 pub const HEALTH_CACHE_TTL_SECS: u64 = 30;
 pub const INTROSPECT_CACHE_TTL_SECS: u64 = 3600;
-pub const HEALTH_CHECK_TIMEOUT_SECS: u64 = 5;
+pub const HEALTH_CHECK_TIMEOUT_SECS: u64 = 15;
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 
 pub fn toolshed_dir() -> PathBuf {

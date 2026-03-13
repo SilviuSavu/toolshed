@@ -34,8 +34,14 @@ services:
       - toolshed-audit:/root/.toolshed/audit
       - toolshed-cache:/root/.toolshed/cache
       - ../tools/vault/tool.json:/root/.toolshed/tools/vault/tool.json:ro
+      - /tmp/orchestrator-workspaces:/workspaces:rw
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"toolshed-self__health\",\"arguments\":{}}}' http://localhost:8081/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
 
 networks:
