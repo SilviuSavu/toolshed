@@ -1,0 +1,19 @@
+FROM sourcegraph/server:6.10.3349
+
+# Replace the frontend binary with our patched version that removes
+# the "Limited Access Mode" restriction on Code Insights.
+#
+# Patches applied (binary-level, x86-64):
+# 1. createInsightLicenseCheck: unconditional jump to "return 0, nil"
+#    - Removes: "Cannot create more than 2 global insights in Limited Access Mode."
+#    - Removes: "Cannot create an insight on a non-global dashboard in Limited Access Mode."
+# 2. DeleteInsightsDashboard: skip license check block
+#    - Removes: "Cannot delete this dashboard in Limited Access Mode"
+# 3. AddInsightViewToDashboard: skip license check block
+#    - Removes: "Cannot add insights to this dashboard while in Limited Access Mode"
+# 4. RemoveInsightViewFromDashboard: skip license check block
+#    - Removes: "Cannot remove insights from this dashboard while in Limited Access Mode"
+# 5. FreezeAllInsights: made into a no-op (returns nil immediately)
+#    - Prevents the background job from freezing insights when no license is present
+
+COPY frontend-patched /usr/local/bin/frontend

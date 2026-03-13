@@ -1,8 +1,10 @@
 services:
   sourcegraph:
-    image: sourcegraph/server:6.10.3349
+    image: sourcegraph/server:6.10.3349-patched
     ports:
       - "7080:7080"
+    environment:
+      - ALLOW_SINGLE_DOCKER_CODE_INSIGHTS=true
     volumes:
       - ~/.sourcegraph/config:/etc/sourcegraph
       - ~/.sourcegraph/data:/var/opt/sourcegraph
