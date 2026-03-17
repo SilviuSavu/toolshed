@@ -15,6 +15,7 @@ const PORT = parseInt(process.env.PORT || '8081', 10);
 const TOOLS_DIR = process.env.TOOLS_DIR || '/tools';
 const CALL_TIMEOUT_MS = 60_000;
 const INIT_TIMEOUT_MS = 30_000;
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
 
 // ---------------------------------------------------------------------------
 // Environment variable resolution for tool.json ${VAR} placeholders
@@ -91,8 +92,11 @@ class StdioMcpServer {
         }
       });
 
-      // Drain stderr (logging only)
-      this.proc.stderr?.on('data', () => {});
+      // Log stderr for diagnostics
+      this.proc.stderr?.on('data', (chunk) => {
+        const msg = chunk.toString().trim();
+        if (msg) console.error(`[${this.name}] ${msg}`);
+      });
 
       // Read newline-delimited JSON from stdout
       const rl = createInterface({ input: this.proc.stdout, crlfDelay: Infinity });
@@ -268,11 +272,10 @@ function jsonRpcError(id, code, message) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const allTools = [];
   const mcpServers = new Map();
-  const nativeToolMap = new Map();
+  const toolIndex = new Map(); // name → tool entry (unified lookup)
 
-  // Discover and initialize tools from TOOLS_DIR
+  // Discover tools from TOOLS_DIR
   let entries;
   try {
     entries = fs.readdirSync(TOOLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory());
@@ -281,29 +284,21 @@ async function main() {
     entries = [];
   }
 
+  // Separate MCP and native tool configs
+  const mcpConfigs = [];
   for (const entry of entries) {
     const configPath = path.join(TOOLS_DIR, entry.name, 'tool.json');
-    if (!fs.existsSync(configPath)) continue;
-
     let config;
     try {
       config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    } catch (err) {
-      console.error(`[${entry.name}] bad tool.json: ${err.message}`);
+    } catch {
       continue;
     }
 
     const name = config.name || entry.name;
 
     if (config.type === 'mcp' && config.mcp) {
-      const server = new StdioMcpServer(name, config.mcp);
-      try {
-        await server.start();
-        mcpServers.set(name, server);
-        allTools.push(...server.tools);
-      } catch (err) {
-        console.error(`[${name}] skipped — ${err.message}`);
-      }
+      mcpConfigs.push({ name, mcp: config.mcp });
     } else if (config.type === 'native') {
       const runScript = path.join(TOOLS_DIR, entry.name, 'run');
       if (!fs.existsSync(runScript)) {
@@ -311,13 +306,39 @@ async function main() {
         continue;
       }
       const defs = buildNativeToolDefs(name, config);
-      for (const d of defs) nativeToolMap.set(d.name, d);
-      allTools.push(...defs);
+      for (const d of defs) toolIndex.set(d.name, d);
       console.log(`[${name}] ready — ${defs.length} native commands`);
     }
   }
 
-  console.log(`toolshed: ${allTools.length} tools registered`);
+  // Start MCP servers in parallel
+  const results = await Promise.allSettled(
+    mcpConfigs.map(async ({ name, mcp }) => {
+      const server = new StdioMcpServer(name, mcp);
+      await server.start();
+      return { name, server };
+    }),
+  );
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      const { name, server } = r.value;
+      mcpServers.set(name, server);
+      for (const t of server.tools) toolIndex.set(t.name, t);
+    } else {
+      console.error(`skipped — ${r.reason?.message}`);
+    }
+  }
+
+  // Cache the tools/list response (immutable after startup)
+  const toolsListResponse = {
+    tools: [...toolIndex.values()].map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    })),
+  };
+
+  console.log(`toolshed: ${toolIndex.size} tools registered`);
 
   // ── HTTP JSON-RPC server ────────────────────────────────────────────────
 
@@ -335,8 +356,18 @@ async function main() {
       return;
     }
 
+    // Read body with size limit
     let body = '';
-    for await (const chunk of req) body += chunk;
+    let overflow = false;
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > MAX_BODY_BYTES) { overflow = true; break; }
+    }
+    if (overflow) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(jsonRpcError(null, -32600, 'Request too large'));
+      return;
+    }
 
     let rpc;
     try {
@@ -367,13 +398,7 @@ async function main() {
           return;
 
         case 'tools/list':
-          result = {
-            tools: allTools.map((t) => ({
-              name: t.name,
-              description: t.description,
-              inputSchema: t.inputSchema,
-            })),
-          };
+          result = toolsListResponse;
           break;
 
         case 'tools/call': {
@@ -382,7 +407,7 @@ async function main() {
             throw Object.assign(new Error('missing tool name'), { code: -32602 });
           }
 
-          const tool = allTools.find((t) => t.name === toolName);
+          const tool = toolIndex.get(toolName);
           if (!tool) {
             throw Object.assign(new Error(`unknown tool: ${toolName}`), { code: -32001 });
           }
@@ -390,8 +415,7 @@ async function main() {
           const callArgs = params?.arguments || {};
 
           if (tool._native) {
-            const def = nativeToolMap.get(toolName);
-            result = await callNativeTool(def, callArgs);
+            result = await callNativeTool(tool, callArgs);
           } else {
             const mcpServer = mcpServers.get(tool._server);
             if (!mcpServer?.ready) {
@@ -422,8 +446,7 @@ async function main() {
   const shutdown = (sig) => {
     console.log(`shutdown (${sig})`);
     for (const s of mcpServers.values()) s.stop();
-    server.close();
-    process.exit(0);
+    server.close(() => process.exit(0));
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));

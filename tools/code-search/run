@@ -4,23 +4,17 @@ set -euo pipefail
 ###############################################################################
 # code-search — lightweight code search via Sourcegraph GraphQL API
 #
-# Retrieves credentials from Vault, runs keyword search, returns results.
+# Expects SRC_ENDPOINT and SRC_ACCESS_TOKEN from environment (set by
+# vault-env.sh at container startup).
 ###############################################################################
-
-VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
-VAULT_TOKEN="${VAULT_TOKEN:-}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# Resolve Sourcegraph credentials from Vault
-_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph" 2>/dev/null) \
-    || die "cannot reach Vault at $VAULT_ADDR"
-SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
-SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
-unset _vault_data
+SG_URL="${SRC_ENDPOINT:-}"
+SG_TOKEN="${SRC_ACCESS_TOKEN:-}"
 
-[[ -n "$SG_URL" && "$SG_URL" != "null" ]] || die "Sourcegraph URL not found in Vault"
-[[ -n "$SG_TOKEN" && "$SG_TOKEN" != "null" ]] || die "Sourcegraph token not found in Vault"
+[[ -n "$SG_URL" ]] || die "SRC_ENDPOINT not set"
+[[ -n "$SG_TOKEN" ]] || die "SRC_ACCESS_TOKEN not set"
 
 graphql() {
     curl -sf -H "Authorization: token $SG_TOKEN" \

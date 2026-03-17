@@ -7,7 +7,7 @@ vault_get() {
   # vault_get <path> <key> — returns the value or empty string
   curl -sf -H "X-Vault-Token: $VAULT_TOKEN" \
     "${VAULT_ADDR}/v1/secret/data/$1" 2>/dev/null \
-    | sed -n "s/.*\"$2\":\"\\([^\"]*\\)\".*/\\1/p"
+    | jq -r ".data.data.$2 // empty"
 }
 
 if [ -z "$VAULT_ADDR" ] || [ -z "$VAULT_TOKEN" ]; then
