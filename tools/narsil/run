@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
+
+_or_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/openrouter")
+export EMBEDDING_API_KEY=$(echo "$_or_data" | jq -r ".data.data.api_key")
+export EMBEDDING_SERVER_ENDPOINT="https://openrouter.ai/api/v1/embeddings"
+unset _or_data
+
+exec narsil-mcp \
+  --repos /Users/savusilviu/g3 \
+  --repos /Users/savusilviu/ci-template \
+  --repos /Users/savusilviu/codebase-index-cli \
+  --repos /Users/savusilviu/toraniko-v2 \
+  --repos /Users/savusilviu/toolshed \
+  --repos /Users/savusilviu/toolshed-src \
+  --repos /Users/savusilviu/gitlab \
+  --git --persist --watch --call-graph --lsp \
+  --neural --neural-model "qwen/qwen3-embedding-8b"
