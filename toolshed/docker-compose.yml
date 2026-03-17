@@ -1,54 +1,31 @@
 services:
   toolshed:
-    image: docker-toolshed
-    entrypoint: ["/vault-env.sh"]
-    command: ["toolshed", "serve", "--port", "8081"]
+    build: .
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ../tools:/tools:ro
+      - /tmp/orchestrator-workspaces:/workspaces:rw
+    environment:
+      # Vault — secrets resolved at startup by vault-env.sh
+      VAULT_ADDR: ${VAULT_ADDR:-http://vault:8200}
+      VAULT_TOKEN: ${VAULT_TOKEN}
+      # Non-secret config
+      PORT: "8081"
+      TOOLS_DIR: /tools
+      UNLEASH_API_URL: http://unleash:4242/api
+      HULY_URL: http://host.docker.internal:8087
+      SRC_ENDPOINT: ${SRC_ENDPOINT:-http://sourcegraph:7080}
+      GITLAB_URL: ${GITLAB_URL:-http://host.docker.internal:8929}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     deploy:
       resources:
         limits:
-          memory: 2G
-    ports:
-      - "8081:8081"
-    environment:
-      # Vault — all other secrets resolved at startup by vault-env.sh
-      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
-      - VAULT_TOKEN=${VAULT_TOKEN}
-      # Non-secret config (no credentials)
-      - GITLAB_BASE_URL=${GITLAB_BASE_URL:-http://gitlab}
-      - DATABASE_URI=${DATABASE_URI:-postgresql://host.docker.internal:5432}
-      - QDRANT_URL=${QDRANT_URL:-http://host.docker.internal:6333}
-      - SRC_ENDPOINT=${SRC_ENDPOINT:-http://sourcegraph:7080}
-      - HULY_URL=http://host.docker.internal:8087
-      - TOOLSHED_URL=http://localhost:8081
-    volumes:
-      - toolshed-data:/root/.toolshed/data
-      - toolshed-audit:/root/.toolshed/audit
-      - toolshed-cache:/root/.toolshed/cache
-      - ../tools/vault/tool.json:/root/.toolshed/tools/vault/tool.json:ro
-      - ./vault-env.sh:/vault-env.sh:ro
-      # TODO(M15): cross-sandbox access risk — toolshed can read/write ALL sandbox workspaces
-      - /tmp/orchestrator-workspaces:/workspaces:rw
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"toolshed-self__health\",\"arguments\":{}}}' http://localhost:8081/ || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+          memory: 1G
     restart: unless-stopped
 
 networks:
   default:
     external: true
     name: infra
-
-volumes:
-  toolshed-data:
-    external: true
-    name: docker_toolshed-data
-  toolshed-audit:
-    external: true
-    name: docker_toolshed-audit
-  toolshed-cache:
-    external: true
-    name: docker_toolshed-cache
