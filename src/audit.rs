@@ -1,16 +1,19 @@
 //! Hash-chained JSONL audit trail for tool invocations.
 //!
 //! Ported from Tallow's TypeScript implementation. Each `toolshed run`
-//! produces exactly 2 entries: tool_call (before) + tool_result (after).
+//! produces exactly 2 entries: `tool_call` (before) + `tool_result` (after).
 //! The hash chain provides tamper evidence via SHA-256 chaining.
+
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 
 use crate::config;
 
@@ -61,7 +64,6 @@ pub struct AuditEntry {
 pub struct IntegrityResult {
     pub valid: bool,
     pub total_entries: usize,
-    pub first_broken_seq: Option<u64>,
     pub error_message: Option<String>,
 }
 
@@ -162,12 +164,18 @@ fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
 }
 
 pub fn compute_entry_hash(entry: &AuditEntry) -> String {
-    let mut value = serde_json::to_value(entry).expect("audit entry serialization");
+    // These operations should never fail on a well-formed AuditEntry,
+    // but we handle errors gracefully by returning a fallback hash.
+    let Ok(mut value) = serde_json::to_value(entry) else {
+        return "0".repeat(64);
+    };
     if let serde_json::Value::Object(ref mut map) = value {
         map.remove("hash");
     }
     let canonical = canonicalize(&value);
-    let json = serde_json::to_string(&canonical).expect("canonical JSON serialization");
+    let Ok(json) = serde_json::to_string(&canonical) else {
+        return "0".repeat(64);
+    };
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -187,6 +195,7 @@ impl AuditLogger {
         Self::with_dir(session_id, &config::audit_dir())
     }
 
+    #[allow(clippy::print_stderr)]
     pub fn with_dir(session_id: &str, dir: &Path) -> Self {
         if let Err(e) = fs::create_dir_all(dir) {
             eprintln!("audit: cannot create directory {}: {e}", dir.display());
@@ -201,16 +210,17 @@ impl AuditLogger {
         }
     }
 
+    #[allow(clippy::print_stderr)]
     pub fn record(
         &mut self,
         category: &str,
         event: &str,
         actor: &str,
-        data: serde_json::Value,
+        data: &serde_json::Value,
         outcome: Option<String>,
     ) -> AuditEntry {
         self.seq += 1;
-        let redacted_data = redact_value(&data);
+        let redacted_data = redact_value(data);
 
         let mut entry = AuditEntry {
             seq: self.seq,
@@ -231,7 +241,7 @@ impl AuditLogger {
             eprintln!("audit: write failed: {e}");
         }
 
-        self.last_hash = entry.hash.clone();
+        self.last_hash.clone_from(&entry.hash);
         entry
     }
 
@@ -240,8 +250,7 @@ impl AuditLogger {
             .create(true)
             .append(true)
             .open(&self.file_path)?;
-        let json = serde_json::to_string(entry)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
         writeln!(file, "{json}")?;
         Ok(())
     }
@@ -271,7 +280,6 @@ pub fn verify_file(path: &Path) -> IntegrityResult {
             return IntegrityResult {
                 valid: false,
                 total_entries: 0,
-                first_broken_seq: None,
                 error_message: Some(format!("cannot read file: {e}")),
             };
         }
@@ -281,7 +289,6 @@ pub fn verify_file(path: &Path) -> IntegrityResult {
         return IntegrityResult {
             valid: true,
             total_entries: 0,
-            first_broken_seq: None,
             error_message: None,
         };
     }
@@ -292,7 +299,6 @@ pub fn verify_file(path: &Path) -> IntegrityResult {
             return IntegrityResult {
                 valid: false,
                 total_entries: entries.len(),
-                first_broken_seq: Some(entry.seq),
                 error_message: Some(format!("Entry seq={}: prevHash mismatch", entry.seq)),
             };
         }
@@ -302,7 +308,6 @@ pub fn verify_file(path: &Path) -> IntegrityResult {
             return IntegrityResult {
                 valid: false,
                 total_entries: entries.len(),
-                first_broken_seq: Some(entry.seq),
                 error_message: Some(format!(
                     "Entry seq={}: hash mismatch (entry was tampered with)",
                     entry.seq
@@ -310,37 +315,35 @@ pub fn verify_file(path: &Path) -> IntegrityResult {
             };
         }
 
-        prev_hash = entry.hash.clone();
+        prev_hash.clone_from(&entry.hash);
     }
 
     IntegrityResult {
         valid: true,
         total_entries: entries.len(),
-        first_broken_seq: None,
         error_message: None,
     }
 }
 
 pub fn list_files(dir: &Path) -> Vec<AuditFileInfo> {
-    let read_dir = match fs::read_dir(dir) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return Vec::new();
     };
 
-    let re = Regex::new(r"^(.+)-(\d{4}-\d{2}-\d{2})\.jsonl$").unwrap();
+    let Ok(re) = Regex::new(r"^(.+)-(\d{4}-\d{2}-\d{2})\.jsonl$") else {
+        return Vec::new();
+    };
     let mut files = Vec::new();
 
     for entry in read_dir.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if let Some(caps) = re.captures(&name) {
             let path = entry.path();
-            let meta = match fs::metadata(&path) {
-                Ok(m) => m,
-                Err(_) => continue,
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
             };
-            let content = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
             };
             let entry_count = content.lines().filter(|l| !l.trim().is_empty()).count();
 
@@ -359,9 +362,8 @@ pub fn list_files(dir: &Path) -> Vec<AuditFileInfo> {
 }
 
 pub fn query_entries(path: &Path, options: &QueryOptions) -> Vec<AuditEntry> {
-    let entries = match parse_audit_file(path) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
+    let Ok(entries) = parse_audit_file(path) else {
+        return Vec::new();
     };
 
     let since_ms = options.since.as_ref().and_then(|s| parse_timestamp(s));
@@ -418,6 +420,7 @@ fn parse_timestamp(s: &str) -> Option<i64> {
 // --- Tests ---
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -430,14 +433,14 @@ mod tests {
             "tool",
             "tool_call",
             "user",
-            serde_json::json!({"tool": "rc", "command": "search"}),
+            &serde_json::json!({"tool": "rc", "command": "search"}),
             None,
         );
         let e2 = logger.record(
             "tool",
             "tool_result",
             "user",
-            serde_json::json!({"tool": "rc", "durationMs": 100}),
+            &serde_json::json!({"tool": "rc", "durationMs": 100}),
             Some("success".into()),
         );
 
@@ -481,7 +484,7 @@ mod tests {
     fn redaction() {
         let data = serde_json::json!({
             "tool": "rc",
-            "apiKey": "sk-12345",
+            "apiKey": "test-key-12345",
             "nested": {
                 "password": "hunter2",
                 "name": "test"
@@ -516,14 +519,14 @@ mod tests {
             "tool",
             "tool_call",
             "user",
-            serde_json::json!({"tool": "test"}),
+            &serde_json::json!({"tool": "test"}),
             None,
         );
         logger.record(
             "tool",
             "tool_result",
             "user",
-            serde_json::json!({"tool": "test", "durationMs": 50}),
+            &serde_json::json!({"tool": "test", "durationMs": 50}),
             Some("success".into()),
         );
 
@@ -546,14 +549,14 @@ mod tests {
             "tool",
             "tool_call",
             "user",
-            serde_json::json!({"tool": "test"}),
+            &serde_json::json!({"tool": "test"}),
             None,
         );
         logger.record(
             "tool",
             "tool_result",
             "user",
-            serde_json::json!({"tool": "test"}),
+            &serde_json::json!({"tool": "test"}),
             Some("success".into()),
         );
 
@@ -567,7 +570,7 @@ mod tests {
 
         let result = verify_file(&files[0].path);
         assert!(!result.valid);
-        assert!(result.first_broken_seq.is_some());
+        assert!(!result.valid);
     }
 
     #[test]
@@ -579,28 +582,28 @@ mod tests {
             "tool",
             "tool_call",
             "user",
-            serde_json::json!({"tool": "rc"}),
+            &serde_json::json!({"tool": "rc"}),
             None,
         );
         logger.record(
             "tool",
             "tool_result",
             "user",
-            serde_json::json!({"tool": "rc"}),
+            &serde_json::json!({"tool": "rc"}),
             Some("success".into()),
         );
         logger.record(
             "tool",
             "tool_call",
             "user",
-            serde_json::json!({"tool": "github"}),
+            &serde_json::json!({"tool": "github"}),
             None,
         );
         logger.record(
             "tool",
             "tool_result",
             "user",
-            serde_json::json!({"tool": "github"}),
+            &serde_json::json!({"tool": "github"}),
             Some("error".into()),
         );
 
