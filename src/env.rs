@@ -1,7 +1,6 @@
 use secrecy::ExposeSecret;
 
-use crate::daemon::state::DaemonState;
-use crate::error::ToolshedError;
+use crate::{daemon::state::DaemonState, error::ToolshedError};
 
 /// Interpolate `${VAR}` and `${VAR:-default}` patterns in a string.
 /// Delegates to `interpolate_with_state` with no `DaemonState`.
