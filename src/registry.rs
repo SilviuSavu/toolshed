@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{config, error::ToolshedError, manifest::ToolManifest};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tool {
     pub dir: PathBuf,
     pub manifest: ToolManifest,
