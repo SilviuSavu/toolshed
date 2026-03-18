@@ -1,7 +1,27 @@
+use secrecy::ExposeSecret;
+
+use crate::daemon::state::DaemonState;
 use crate::error::ToolshedError;
 
 /// Interpolate `${VAR}` and `${VAR:-default}` patterns in a string.
+/// Delegates to `interpolate_with_state` with no `DaemonState`.
 pub fn interpolate(input: &str) -> Result<String, ToolshedError> {
+    interpolate_with_state(input, None)
+}
+
+/// Interpolate all values in a map.
+pub fn interpolate_map(
+    map: &std::collections::BTreeMap<String, String>,
+) -> Result<std::collections::BTreeMap<String, String>, ToolshedError> {
+    interpolate_map_with_state(map, None)
+}
+
+/// Interpolate `${VAR}` patterns, checking `DaemonState` secrets first,
+/// then falling back to environment variables.
+pub fn interpolate_with_state(
+    input: &str,
+    state: Option<&DaemonState>,
+) -> Result<String, ToolshedError> {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
 
@@ -18,28 +38,26 @@ pub fn interpolate(input: &str) -> Result<String, ToolshedError> {
                 var_expr.push(ch);
             }
             if !found_close {
-                // Malformed — just pass through literally
                 result.push('$');
                 result.push('{');
                 result.push_str(&var_expr);
                 continue;
             }
 
-            // Parse VAR:-default
             if let Some(sep_pos) = var_expr.find(":-") {
                 let var_name = &var_expr[..sep_pos];
                 let default_val = &var_expr[sep_pos + 2..];
-                match std::env::var(var_name) {
-                    Ok(val) if !val.is_empty() => result.push_str(&val),
+                match resolve_var(var_name, state) {
+                    Some(val) if !val.is_empty() => result.push_str(&val),
                     _ => result.push_str(default_val),
                 }
             } else {
                 let var_name = &var_expr;
-                match std::env::var(var_name) {
-                    Ok(val) => result.push_str(&val),
-                    Err(_) => {
+                match resolve_var(var_name, state) {
+                    Some(val) => result.push_str(&val),
+                    None => {
                         return Err(ToolshedError::EnvVarNotSet {
-                            var: var_name.to_string(),
+                            var: var_name.clone(),
                         });
                     }
                 }
@@ -52,16 +70,30 @@ pub fn interpolate(input: &str) -> Result<String, ToolshedError> {
     Ok(result)
 }
 
-/// Interpolate all values in a map.
-pub fn interpolate_map(
+/// Interpolate all values in a map, checking `DaemonState` secrets
+/// first.
+pub fn interpolate_map_with_state(
     map: &std::collections::BTreeMap<String, String>,
+    state: Option<&DaemonState>,
 ) -> Result<std::collections::BTreeMap<String, String>, ToolshedError> {
     map.iter()
-        .map(|(k, v)| Ok((k.clone(), interpolate(v)?)))
+        .map(|(k, v)| Ok((k.clone(), interpolate_with_state(v, state)?)))
         .collect()
 }
 
+/// Resolve a variable name: check `DaemonState` secrets first, then
+/// env.
+fn resolve_var(name: &str, state: Option<&DaemonState>) -> Option<String> {
+    if let Some(st) = state {
+        if let Some(entry) = st.get_secret(name) {
+            return Some(entry.value.expose_secret().to_string());
+        }
+    }
+    std::env::var(name).ok()
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -1,7 +1,12 @@
-use crate::env;
-use crate::error::ToolshedError;
-use crate::mcp::protocol::*;
-use crate::registry::Tool;
+use crate::{
+    env,
+    error::ToolshedError,
+    mcp::protocol::{
+        InitializeParams, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpToolDef,
+        ToolCallResult, ToolsCallParams, ToolsListResult,
+    },
+    registry::Tool,
+};
 
 /// Call a tool via MCP streamable HTTP transport.
 pub async fn call_tool(
@@ -10,8 +15,20 @@ pub async fn call_tool(
     arguments: serde_json::Value,
     _timeout: Option<u64>,
 ) -> Result<String, ToolshedError> {
-    let mcp_cfg = tool.manifest.mcp.as_ref().unwrap();
-    let url = mcp_cfg.url.as_ref().unwrap();
+    let mcp_cfg = tool
+        .manifest
+        .mcp
+        .as_ref()
+        .ok_or_else(|| ToolshedError::MissingMcpConfig {
+            tool: tool.manifest.name.clone(),
+        })?;
+    let url = mcp_cfg
+        .url
+        .as_ref()
+        .ok_or_else(|| ToolshedError::McpSpawnFailed {
+            tool: tool.manifest.name.clone(),
+            reason: "missing url".to_string(),
+        })?;
     let headers = env::interpolate_map(&mcp_cfg.headers)?;
 
     let client = reqwest::Client::builder()
@@ -23,11 +40,7 @@ pub async fn call_tool(
 
     // Step 1: Initialize
     let init_params = InitializeParams::default_params();
-    let init_req = JsonRpcRequest::new(
-        1,
-        "initialize",
-        Some(serde_json::to_value(init_params).unwrap()),
-    );
+    let init_req = JsonRpcRequest::new(1, "initialize", Some(serde_json::to_value(init_params)?));
     let init_resp = send_rpc(&client, url, &headers, &init_req, &tool.manifest.name).await?;
 
     // Extract session ID if present
@@ -35,7 +48,7 @@ pub async fn call_tool(
         .headers()
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let _init_result: JsonRpcResponse = parse_json_response(init_resp, &tool.manifest.name).await?;
 
@@ -55,11 +68,7 @@ pub async fn call_tool(
         name: tool_name.to_string(),
         arguments,
     };
-    let call_req = JsonRpcRequest::new(
-        2,
-        "tools/call",
-        Some(serde_json::to_value(call_params).unwrap()),
-    );
+    let call_req = JsonRpcRequest::new(2, "tools/call", Some(serde_json::to_value(call_params)?));
 
     let mut req_builder = client.post(url).json(&call_req);
     for (k, v) in &headers {
@@ -124,8 +133,20 @@ pub async fn call_tool(
 
 /// List tools via MCP HTTP.
 pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
-    let mcp_cfg = tool.manifest.mcp.as_ref().unwrap();
-    let url = mcp_cfg.url.as_ref().unwrap();
+    let mcp_cfg = tool
+        .manifest
+        .mcp
+        .as_ref()
+        .ok_or_else(|| ToolshedError::MissingMcpConfig {
+            tool: tool.manifest.name.clone(),
+        })?;
+    let url = mcp_cfg
+        .url
+        .as_ref()
+        .ok_or_else(|| ToolshedError::McpSpawnFailed {
+            tool: tool.manifest.name.clone(),
+            reason: "missing url".to_string(),
+        })?;
     let headers = env::interpolate_map(&mcp_cfg.headers)?;
 
     let client = reqwest::Client::builder()
@@ -137,18 +158,14 @@ pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
 
     // Initialize
     let init_params = InitializeParams::default_params();
-    let init_req = JsonRpcRequest::new(
-        1,
-        "initialize",
-        Some(serde_json::to_value(init_params).unwrap()),
-    );
+    let init_req = JsonRpcRequest::new(1, "initialize", Some(serde_json::to_value(init_params)?));
     let init_resp = send_rpc(&client, url, &headers, &init_req, &tool.manifest.name).await?;
 
     let session_id = init_resp
         .headers()
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let _: JsonRpcResponse = parse_json_response(init_resp, &tool.manifest.name).await?;
 

@@ -1,8 +1,8 @@
-use crate::config::DEFAULT_TOOL_TIMEOUT_SECS;
-use crate::error::ToolshedError;
-use crate::registry::Tool;
 use std::time::Duration;
+
 use tokio::process::Command;
+
+use crate::{config::DEFAULT_TOOL_TIMEOUT_SECS, error::ToolshedError, registry::Tool};
 
 pub async fn run(
     tool: &Tool,
@@ -60,8 +60,8 @@ pub async fn run(
 
     match result {
         Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
             if output.status.success() {
                 Ok(stdout)

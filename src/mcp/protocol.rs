@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
-// ─── JSON-RPC ──────────────────────────────────────────────
+// ── JSON-RPC ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
@@ -60,7 +60,7 @@ pub struct JsonRpcError {
     pub data: Option<serde_json::Value>,
 }
 
-// ─── MCP Initialize ────────────────────────────────────────
+// ── MCP Initialize ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeParams {
@@ -93,7 +93,7 @@ impl InitializeParams {
     }
 }
 
-// ─── MCP Tools ─────────────────────────────────────────────
+// ── MCP Tools ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsCallParams {
@@ -151,6 +151,7 @@ impl ContentItem {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

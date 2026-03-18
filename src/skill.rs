@@ -1,20 +1,14 @@
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::Path};
 
-use crate::config;
-use crate::error::ToolshedError;
-use crate::frontmatter;
-use crate::manifest;
+use crate::{config, error::ToolshedError, frontmatter, manifest};
 
 #[derive(Debug, Clone)]
 pub struct SkillManifest {
-    pub name: String,
     pub description: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct Skill {
-    pub dir: PathBuf,
     pub manifest: SkillManifest,
     pub body: String,
 }
@@ -43,17 +37,17 @@ impl SkillRegistry {
                 continue;
             }
 
-            let dir_name = match entry.file_name().to_str() {
-                Some(n) => n.to_string(),
-                None => continue,
+            let file_name = entry.file_name();
+            let Some(dir_name) = file_name.to_str() else {
+                continue;
             };
 
-            match load_skill(&path, &dir_name) {
+            match load_skill(&path, dir_name) {
                 Ok(skill) => {
-                    skills.insert(dir_name, skill);
+                    skills.insert(dir_name.to_string(), skill);
                 }
                 Err(e) => {
-                    errors.push((dir_name, e.to_string()));
+                    errors.push((dir_name.to_string(), e.to_string()));
                 }
             }
         }
@@ -62,7 +56,7 @@ impl SkillRegistry {
     }
 }
 
-fn load_skill(dir: &PathBuf, dir_name: &str) -> Result<Skill, ToolshedError> {
+fn load_skill(dir: &Path, dir_name: &str) -> Result<Skill, ToolshedError> {
     let skill_md = dir.join("SKILL.md");
 
     if !skill_md.exists() {
@@ -95,7 +89,7 @@ fn load_skill(dir: &PathBuf, dir_name: &str) -> Result<Skill, ToolshedError> {
     if name != dir_name {
         return Err(ToolshedError::BadSkill {
             skill: dir_name.to_string(),
-            reason: format!("name '{}' does not match directory '{dir_name}'", name),
+            reason: format!("name '{name}' does not match directory '{dir_name}'"),
         });
     }
 
@@ -103,7 +97,7 @@ fn load_skill(dir: &PathBuf, dir_name: &str) -> Result<Skill, ToolshedError> {
     if !manifest::is_valid_name(name) {
         return Err(ToolshedError::BadSkill {
             skill: dir_name.to_string(),
-            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{}'", name),
+            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{name}'"),
         });
     }
 
@@ -122,11 +116,9 @@ fn load_skill(dir: &PathBuf, dir_name: &str) -> Result<Skill, ToolshedError> {
     }
 
     Ok(Skill {
-        dir: dir.clone(),
         manifest: SkillManifest {
-            name: name.clone(),
             description: description.clone(),
         },
-        body: body.to_string(),
+        body,
     })
 }

@@ -1,7 +1,4 @@
-use crate::error::ToolshedError;
-use crate::manifest::McpTransport;
-use crate::mcp;
-use crate::registry::Tool;
+use crate::{error::ToolshedError, manifest::McpTransport, mcp, registry::Tool};
 
 pub async fn run(
     tool: &Tool,
@@ -18,7 +15,7 @@ pub async fn run(
         })?;
 
     // Parse --key value pairs into JSON object
-    let arguments = parse_mcp_args(args)?;
+    let arguments = parse_mcp_args(args);
 
     match mcp_cfg.transport {
         McpTransport::Stdio => mcp::stdio::call_tool(tool, command, arguments, timeout).await,
@@ -26,7 +23,7 @@ pub async fn run(
     }
 }
 
-fn parse_mcp_args(args: &[String]) -> Result<serde_json::Value, ToolshedError> {
+fn parse_mcp_args(args: &[String]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     let mut i = 0;
 
@@ -51,5 +48,5 @@ fn parse_mcp_args(args: &[String]) -> Result<serde_json::Value, ToolshedError> {
         }
     }
 
-    Ok(serde_json::Value::Object(map))
+    serde_json::Value::Object(map)
 }

@@ -1,8 +1,6 @@
-use crate::config;
-use crate::error::ToolshedError;
-use crate::manifest::ToolManifest;
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
+
+use crate::{config, error::ToolshedError, manifest::ToolManifest};
 
 #[derive(Debug)]
 pub struct Tool {
@@ -22,7 +20,7 @@ impl Registry {
     pub fn load() -> Result<Self, ToolshedError> {
         let tools_dir = config::tools_dir();
 
-        let mut registry = Registry {
+        let mut registry = Self {
             by_category: BTreeMap::new(),
             tools: BTreeMap::new(),
             errors: Vec::new(),
@@ -37,9 +35,8 @@ impl Registry {
         })?;
 
         for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
+            let Ok(entry) = entry else {
+                continue;
             };
 
             let path = entry.path();
@@ -47,10 +44,10 @@ impl Registry {
                 continue;
             }
 
-            let dir_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
+            let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
             };
+            let dir_name = dir_name.to_string();
 
             let manifest_path = path.join("tool.json");
             if !manifest_path.exists() {

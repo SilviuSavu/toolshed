@@ -1,21 +1,15 @@
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::Path};
 
-use crate::config;
-use crate::error::ToolshedError;
-use crate::frontmatter;
-use crate::manifest;
+use crate::{config, error::ToolshedError, frontmatter, manifest};
 
 #[derive(Debug, Clone)]
 pub struct AgentManifest {
-    pub name: String,
     pub description: String,
     pub model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Agent {
-    pub dir: PathBuf,
     pub manifest: AgentManifest,
     pub prompt: String,
 }
@@ -44,17 +38,17 @@ impl AgentRegistry {
                 continue;
             }
 
-            let dir_name = match entry.file_name().to_str() {
-                Some(n) => n.to_string(),
-                None => continue,
+            let file_name = entry.file_name();
+            let Some(dir_name) = file_name.to_str() else {
+                continue;
             };
 
-            match load_agent(&path, &dir_name) {
+            match load_agent(&path, dir_name) {
                 Ok(agent) => {
-                    agents.insert(dir_name, agent);
+                    agents.insert(dir_name.to_string(), agent);
                 }
                 Err(e) => {
-                    errors.push((dir_name, e.to_string()));
+                    errors.push((dir_name.to_string(), e.to_string()));
                 }
             }
         }
@@ -63,7 +57,7 @@ impl AgentRegistry {
     }
 }
 
-fn load_agent(dir: &PathBuf, dir_name: &str) -> Result<Agent, ToolshedError> {
+fn load_agent(dir: &Path, dir_name: &str) -> Result<Agent, ToolshedError> {
     let agent_md = dir.join("AGENT.md");
 
     if !agent_md.exists() {
@@ -98,7 +92,7 @@ fn load_agent(dir: &PathBuf, dir_name: &str) -> Result<Agent, ToolshedError> {
     if name != dir_name {
         return Err(ToolshedError::BadAgent {
             agent: dir_name.to_string(),
-            reason: format!("name '{}' does not match directory '{dir_name}'", name),
+            reason: format!("name '{name}' does not match directory '{dir_name}'"),
         });
     }
 
@@ -106,7 +100,7 @@ fn load_agent(dir: &PathBuf, dir_name: &str) -> Result<Agent, ToolshedError> {
     if !manifest::is_valid_name(name) {
         return Err(ToolshedError::BadAgent {
             agent: dir_name.to_string(),
-            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{}'", name),
+            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{name}'"),
         });
     }
 
@@ -143,9 +137,7 @@ fn load_agent(dir: &PathBuf, dir_name: &str) -> Result<Agent, ToolshedError> {
     }
 
     Ok(Agent {
-        dir: dir.clone(),
         manifest: AgentManifest {
-            name: name.clone(),
             description: description.clone(),
             model,
         },

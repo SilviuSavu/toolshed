@@ -1,9 +1,8 @@
-use crate::config::DEFAULT_MAX_OUTPUT;
-use crate::error::ToolshedError;
+use std::{collections::BTreeMap, fmt, path::Path};
+
 use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::fmt;
-use std::path::Path;
+
+use crate::{config::DEFAULT_MAX_OUTPUT, error::ToolshedError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -87,12 +86,6 @@ pub struct McpConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    #[serde(default = "default_idle_timeout")]
-    pub idle_timeout: u64,
-}
-
-fn default_idle_timeout() -> u64 {
-    crate::config::DEFAULT_IDLE_TIMEOUT
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,7 +103,7 @@ pub struct ToolManifest {
     pub mcp: Option<McpConfig>,
 }
 
-fn default_max_output() -> usize {
+const fn default_max_output() -> usize {
     DEFAULT_MAX_OUTPUT
 }
 
@@ -214,7 +207,7 @@ impl ToolManifest {
     }
 }
 
-pub(crate) fn is_valid_name(s: &str) -> bool {
+pub fn is_valid_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.chars()
@@ -229,6 +222,7 @@ fn is_valid_category(s: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

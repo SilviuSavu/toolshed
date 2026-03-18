@@ -1,19 +1,23 @@
-use crate::config::HEALTH_CHECK_TIMEOUT_SECS;
-use crate::manifest::ToolType;
-use crate::registry::{Registry, Tool};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{collections::HashMap, path::Path, time::Duration};
+
 use tokio::process::Command;
 
-/// Check health for a single tool. Returns Some(true/false) if health is configured, None otherwise.
+use crate::{
+    config::HEALTH_CHECK_TIMEOUT_SECS,
+    manifest::ToolType,
+    registry::{Registry, Tool},
+};
+
+/// Check health for a single tool. Returns Some(true/false) if health is
+/// configured, None otherwise.
 pub async fn check_one(tool: &Tool) -> Option<bool> {
     let health_cmd = tool.manifest.health.as_ref()?;
     let resolved = resolve_health_cmd(health_cmd, tool);
     Some(run_health_check(&resolved, &tool.dir).await)
 }
 
-/// Check health for all tools in the registry. Returns a map of tool_name -> Option<bool>.
+/// Check health for all tools in the registry. Returns a map of `tool_name` ->
+/// `Option<bool>`.
 pub async fn check_all(registry: &Registry) -> HashMap<String, Option<bool>> {
     let mut handles = Vec::new();
 
@@ -52,15 +56,15 @@ fn resolve_health_cmd(cmd: &str, tool: &Tool) -> String {
         return cmd.to_string();
     }
 
-    let run_path = match &tool.run_path {
-        Some(p) => p,
-        None => return cmd.to_string(),
+    let Some(run_path) = &tool.run_path else {
+        return cmd.to_string();
     };
 
     let tool_name = &tool.manifest.name;
 
     // Only resolve if the command is exactly the tool name (no args)
-    // and the manifest defines at least one command (so `run` accepts bare invocation).
+    // and the manifest defines at least one command (so `run` accepts bare
+    // invocation).
     if cmd == tool_name && !tool.manifest.commands.is_empty() {
         return run_path.display().to_string();
     }
@@ -80,7 +84,7 @@ fn resolve_health_cmd(cmd: &str, tool: &Tool) -> String {
     cmd.to_string()
 }
 
-async fn run_health_check(cmd: &str, working_dir: &PathBuf) -> bool {
+async fn run_health_check(cmd: &str, working_dir: &Path) -> bool {
     let result = tokio::time::timeout(
         Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS),
         Command::new("sh")

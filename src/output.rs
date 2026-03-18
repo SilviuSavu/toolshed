@@ -22,18 +22,17 @@ pub fn truncate(input: &str, max_chars: usize) -> String {
         .take(max_chars - search_start)
         .collect();
 
-    let cut_point = if let Some(nl_pos) = search_region.rfind('\n') {
+    let cut_point = search_region.rfind('\n').map_or(max_chars, |nl_pos| {
         // Found a newline — cut there
         let char_offset = search_start + search_region[..nl_pos].chars().count();
         char_offset + 1 // include the newline
-    } else {
-        max_chars
-    };
+    });
 
     let result: String = input.chars().take(cut_point).collect();
 
     format!(
-        "{result}\n[output truncated: {char_count} chars total, showing first {cut_point}. Rerun with --full for complete output]"
+        "{result}\n[output truncated: {char_count} chars total, showing first {cut_point}. Rerun \
+         with --full for complete output]"
     )
 }
 
@@ -52,8 +51,8 @@ fn is_binary(input: &str) -> bool {
                 && **c != '\t'
         })
         .count();
-    let ratio = non_printable as f64 / sample.len() as f64;
-    ratio > 0.1
+    // Binary if >10% non-printable characters; multiply to avoid float casts
+    non_printable * 10 > sample.len()
 }
 
 #[cfg(test)]
@@ -106,7 +105,7 @@ mod tests {
     fn binary_detection() {
         let mut input = String::new();
         for i in 0..100u8 {
-            input.push(i as char);
+            input.push(char::from(i));
         }
         let result = truncate(&input, 50);
         assert!(result.contains("[binary output detected:"));

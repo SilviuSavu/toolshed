@@ -1,12 +1,6 @@
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::Path};
 
-use crate::config;
-use crate::error::ToolshedError;
-use crate::frontmatter;
-use crate::manifest;
-use crate::registry;
-use crate::runner;
+use crate::{config, error::ToolshedError, frontmatter, manifest, registry, runner};
 
 #[derive(Debug, Clone)]
 pub struct WorkflowManifest {
@@ -21,15 +15,12 @@ pub struct Step {
     pub command: String,
     pub args: Vec<String>,
     pub continue_on_error: bool,
-    pub line_number: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct Workflow {
-    pub dir: PathBuf,
     pub manifest: WorkflowManifest,
     pub steps: Vec<Step>,
-    pub body: String,
 }
 
 pub struct WorkflowRegistry {
@@ -56,17 +47,17 @@ impl WorkflowRegistry {
                 continue;
             }
 
-            let dir_name = match entry.file_name().to_str() {
-                Some(n) => n.to_string(),
-                None => continue,
+            let file_name = entry.file_name();
+            let Some(dir_name) = file_name.to_str() else {
+                continue;
             };
 
-            match load_workflow(&path, &dir_name) {
+            match load_workflow(&path, dir_name) {
                 Ok(wf) => {
-                    workflows.insert(dir_name, wf);
+                    workflows.insert(dir_name.to_string(), wf);
                 }
                 Err(e) => {
-                    errors.push((dir_name, e.to_string()));
+                    errors.push((dir_name.to_string(), e.to_string()));
                 }
             }
         }
@@ -75,7 +66,7 @@ impl WorkflowRegistry {
     }
 }
 
-fn load_workflow(dir: &PathBuf, dir_name: &str) -> Result<Workflow, ToolshedError> {
+fn load_workflow(dir: &Path, dir_name: &str) -> Result<Workflow, ToolshedError> {
     let wf_md = dir.join("WORKFLOW.md");
 
     if !wf_md.exists() {
@@ -108,7 +99,7 @@ fn load_workflow(dir: &PathBuf, dir_name: &str) -> Result<Workflow, ToolshedErro
     if name != dir_name {
         return Err(ToolshedError::BadWorkflow {
             workflow: dir_name.to_string(),
-            reason: format!("name '{}' does not match directory '{dir_name}'", name),
+            reason: format!("name '{name}' does not match directory '{dir_name}'"),
         });
     }
 
@@ -116,7 +107,7 @@ fn load_workflow(dir: &PathBuf, dir_name: &str) -> Result<Workflow, ToolshedErro
     if !manifest::is_valid_name(name) {
         return Err(ToolshedError::BadWorkflow {
             workflow: dir_name.to_string(),
-            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{}'", name),
+            reason: format!("name must be 1-64 chars, [a-z0-9_-] only, got '{name}'"),
         });
     }
 
@@ -159,14 +150,12 @@ fn load_workflow(dir: &PathBuf, dir_name: &str) -> Result<Workflow, ToolshedErro
     }
 
     Ok(Workflow {
-        dir: dir.clone(),
         manifest: WorkflowManifest {
             name: name.clone(),
             description: description.clone(),
             timeout,
         },
         steps,
-        body: body.to_string(),
     })
 }
 
@@ -175,9 +164,8 @@ pub fn shell_split(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
 
-    while let Some(c) = chars.next() {
+    for c in line.chars() {
         if c == '"' {
             in_quotes = !in_quotes;
         } else if c == ' ' && !in_quotes {
@@ -209,11 +197,9 @@ pub fn parse_steps(body: &str, workflow_name: &str) -> Result<Vec<Step>, Toolshe
         }
 
         // Check for continue-on-error marker
-        let (step_line, continue_on_error) = if trimmed.ends_with(" ?") {
-            (&trimmed[..trimmed.len() - 2], true)
-        } else {
-            (trimmed, false)
-        };
+        let (step_line, continue_on_error) = trimmed
+            .strip_suffix(" ?")
+            .map_or((trimmed, false), |stripped| (stripped, true));
 
         let tokens = shell_split(step_line);
         if tokens.is_empty() {
@@ -232,19 +218,21 @@ pub fn parse_steps(body: &str, workflow_name: &str) -> Result<Vec<Step>, Toolshe
             command: tokens[1].clone(),
             args: tokens[2..].to_vec(),
             continue_on_error,
-            line_number: i + 1,
         });
     }
 
     Ok(steps)
 }
 
-/// Replace `${prev}` in a string with the given value.
+/// Replace the `${prev}` placeholder in a string with the given value.
+#[allow(clippy::literal_string_with_formatting_args)]
 fn substitute_prev(input: &str, prev: &str) -> String {
     input.replace("${prev}", prev)
 }
 
-/// Execute a workflow: run each step sequentially, passing stdout via `${prev}`.
+/// Execute a workflow: run each step sequentially, passing stdout via
+/// `${prev}`.
+#[allow(clippy::print_stderr)]
 pub async fn execute(
     workflow: &Workflow,
     reg: &registry::Registry,
@@ -289,7 +277,7 @@ pub async fn execute(
                 step: i + 1,
                 tool: tool_name.clone(),
                 command: command.clone(),
-                reason: format!("tool '{}' not found", tool_name),
+                reason: format!("tool '{tool_name}' not found"),
             })?;
 
         let step_timeout = Some(remaining.as_secs());
@@ -344,6 +332,7 @@ pub async fn execute(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -397,14 +386,6 @@ mod tests {
         let steps = parse_steps(body, "test").unwrap();
         assert!(steps[0].continue_on_error);
         assert!(!steps[1].continue_on_error);
-    }
-
-    #[test]
-    fn parse_steps_line_numbers() {
-        let body = "# comment\necho say hello\n\necho say world\n";
-        let steps = parse_steps(body, "test").unwrap();
-        assert_eq!(steps[0].line_number, 2);
-        assert_eq!(steps[1].line_number, 4);
     }
 
     #[test]

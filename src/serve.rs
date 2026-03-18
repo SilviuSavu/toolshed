@@ -1,25 +1,31 @@
-use crate::error::ToolshedError;
-use crate::manifest::{ArgType, ToolType};
-use crate::mcp::protocol::{ContentItem, McpToolDef, ToolCallResult, MCP_PROTOCOL_VERSION};
-use crate::registry::{Registry, Tool};
-use crate::{mcp, runner};
-use axum::body::Body;
-use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use std::{collections::HashMap, sync::Arc};
+
+use axum::{
+    body::Body,
+    extract::{Query, State},
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-// ─── Incoming JSON-RPC (flexible id for server use) ─────────
+use crate::{
+    error::ToolshedError,
+    manifest::{ArgType, ToolType},
+    mcp,
+    mcp::protocol::{ContentItem, McpToolDef, ToolCallResult, MCP_PROTOCOL_VERSION},
+    registry::{Registry, Tool},
+    runner,
+};
+
+// ── Incoming JSON-RPC ──
 
 #[derive(Debug, Deserialize)]
 struct IncomingJsonRpc {
-    #[allow(dead_code)]
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     id: Option<serde_json::Value>,
     method: String,
     params: Option<serde_json::Value>,
@@ -62,7 +68,7 @@ impl OutgoingJsonRpc {
     }
 }
 
-// ─── Exposed tool index ─────────────────────────────────────
+// ── Exposed tool index ──
 
 #[derive(Debug, Clone)]
 struct ExposedTool {
@@ -76,11 +82,11 @@ struct ExposedTool {
 struct AppState {
     exposed: Vec<ExposedTool>,
     registry: Registry,
-    /// Per-session channels: session_id → sender for SSE responses
+    /// Per-session channels: `session_id` to sender for SSE responses
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
 }
 
-// ─── Build tool index ───────────────────────────────────────
+// ── Build tool index ──
 
 async fn build_tool_index(registry: &Registry, category_filter: Option<&str>) -> Vec<ExposedTool> {
     let mut exposed = Vec::new();
@@ -136,8 +142,9 @@ async fn build_tool_index(registry: &Registry, category_filter: Option<&str>) ->
                         });
                     }
                 }
+                #[allow(clippy::print_stderr)]
                 Err(e) => {
-                    eprintln!("warning: failed to introspect MCP tool '{}': {}", name, e);
+                    eprintln!("warning: failed to introspect MCP tool '{name}': {e}");
                 }
             },
         }
@@ -181,15 +188,14 @@ fn build_native_schema(cmd: &crate::manifest::CommandDef) -> serde_json::Value {
     })
 }
 
-// ─── Schema sanitization (vLLM compat) ─────────────────────
+// ── Schema sanitization (vLLM compat) ──
 
-/// Recursively sanitize JSON Schema so vLLM's trim_schema() won't crash.
+/// Recursively sanitize JSON Schema so vLLM's `trim_schema()` won't crash.
 /// vLLM expects every property to have a "type" field. Properties using
-/// "anyOf" without a "type" key cause a KeyError in vLLM's trim_schema.
+/// "anyOf" without a "type" key cause a `KeyError` in vLLM's `trim_schema`.
 fn sanitize_schema(schema: &mut serde_json::Value) {
-    let obj = match schema.as_object_mut() {
-        Some(o) => o,
-        None => return,
+    let Some(obj) = schema.as_object_mut() else {
+        return;
     };
 
     // If this object has "anyOf" but no "type", resolve it
@@ -202,12 +208,10 @@ fn sanitize_schema(schema: &mut serde_json::Value) {
                     .filter_map(|v| v.get("type").and_then(|t| t.as_str()))
                     .filter(|t| *t != "null")
                     .collect();
-                if types.len() == 1 {
-                    obj.insert("type".to_string(), serde_json::json!(types[0]));
-                } else if !types.is_empty() {
-                    obj.insert("type".to_string(), serde_json::json!(types[0]));
-                } else {
+                if types.is_empty() {
                     obj.insert("type".to_string(), serde_json::json!("string"));
+                } else {
+                    obj.insert("type".to_string(), serde_json::json!(types[0]));
                 }
             }
         }
@@ -228,15 +232,14 @@ fn sanitize_schema(schema: &mut serde_json::Value) {
     }
 }
 
-// ─── JSON args → CLI args ───────────────────────────────────
+// ── JSON args to CLI args ──
 
 fn json_to_cli_args(
     cmd_def: &crate::manifest::CommandDef,
     arguments: &serde_json::Value,
 ) -> Vec<String> {
-    let map = match arguments.as_object() {
-        Some(m) => m,
-        None => return Vec::new(),
+    let Some(map) = arguments.as_object() else {
+        return Vec::new();
     };
 
     let mut positional_args: Vec<(String, String)> = Vec::new();
@@ -270,7 +273,7 @@ fn json_to_cli_args(
     args
 }
 
-// ─── SSE endpoint: GET /sse ─────────────────────────────────
+// ── SSE endpoint: GET /sse ──
 
 async fn handle_sse(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -309,7 +312,7 @@ async fn handle_sse(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 }
 
-// ─── Messages endpoint: POST /messages ──────────────────────
+// ── Messages endpoint: POST /messages ──
 
 #[derive(Debug, Deserialize)]
 struct MessageQuery {
@@ -323,7 +326,6 @@ async fn handle_messages(
     Json(req): Json<IncomingJsonRpc>,
 ) -> impl IntoResponse {
     let session_id = query.session_id;
-    let id = req.id.clone();
 
     let resp = process_rpc(&state, req).await;
 
@@ -333,18 +335,15 @@ async fn handle_messages(
         let sessions = state.sessions.lock().await;
         if let Some(tx) = sessions.get(&session_id) {
             let _ = tx.send(json_str);
-        } else {
-            eprintln!(
-                "warning: no SSE session for id={}, method response for id={:?} dropped",
-                session_id, id
-            );
         }
+        // Silently drop responses for missing sessions — this can happen
+        // when an SSE connection closes before the response is ready.
     }
 
     StatusCode::ACCEPTED
 }
 
-// ─── Plain POST endpoint: POST / ────────────────────────────
+// ── Plain POST endpoint: POST / ──
 
 async fn handle_post(
     State(state): State<Arc<AppState>>,
@@ -388,43 +387,30 @@ async fn process_rpc(state: &AppState, req: IncomingJsonRpc) -> OutgoingJsonRpc 
         }
 
         "tools/call" => {
-            let params = match req.params {
-                Some(p) => p,
-                None => {
-                    return OutgoingJsonRpc::error(id, -32602, "missing params".to_string());
-                }
+            let Some(params) = req.params else {
+                return OutgoingJsonRpc::error(id, -32602, "missing params".to_string());
             };
 
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let arguments = params
                 .get("arguments")
                 .cloned()
-                .unwrap_or(serde_json::json!({}));
+                .unwrap_or_else(|| serde_json::json!({}));
 
-            let exposed = match state
+            let Some(exposed) = state
                 .exposed
                 .iter()
                 .find(|e| e.namespaced_name == tool_name)
-            {
-                Some(e) => e,
-                None => {
-                    return OutgoingJsonRpc::error(
-                        id,
-                        -32602,
-                        format!("unknown tool: {tool_name}"),
-                    );
-                }
+            else {
+                return OutgoingJsonRpc::error(id, -32602, format!("unknown tool: {tool_name}"));
             };
 
-            let registry_tool = match state.registry.tools.get(&exposed.tool_name) {
-                Some(t) => t,
-                None => {
-                    return OutgoingJsonRpc::error(
-                        id,
-                        -32603,
-                        format!("tool not found in registry: {}", exposed.tool_name),
-                    );
-                }
+            let Some(registry_tool) = state.registry.tools.get(&exposed.tool_name) else {
+                return OutgoingJsonRpc::error(
+                    id,
+                    -32603,
+                    format!("tool not found in registry: {}", exposed.tool_name),
+                );
             };
 
             let result = dispatch_tool(registry_tool, exposed, &arguments).await;
@@ -439,7 +425,10 @@ async fn process_rpc(state: &AppState, req: IncomingJsonRpc) -> OutgoingJsonRpc 
                 is_error,
             };
 
-            OutgoingJsonRpc::result(id, serde_json::to_value(tool_call_result).unwrap())
+            match serde_json::to_value(tool_call_result) {
+                Ok(v) => OutgoingJsonRpc::result(id, v),
+                Err(e) => OutgoingJsonRpc::error(id, -32603, format!("serialization failed: {e}")),
+            }
         }
 
         _ => OutgoingJsonRpc::error(id, -32601, format!("method not found: {}", req.method)),
@@ -485,8 +474,9 @@ async fn dispatch_tool(
     }
 }
 
-// ─── Server entry point ─────────────────────────────────────
+// ── Server entry point ──
 
+#[allow(clippy::print_stderr)]
 pub async fn serve(port: u16, category: Option<String>) -> Result<(), ToolshedError> {
     let registry = Registry::load()?;
 
@@ -519,17 +509,19 @@ pub async fn serve(port: u16, category: Option<String>) -> Result<(), ToolshedEr
 
     axum::serve(listener, app)
         .await
-        .map_err(|e| ToolshedError::Io(e.into()))?;
+        .map_err(ToolshedError::Io)?;
 
     Ok(())
 }
 
-// ─── Tests ──────────────────────────────────────────────────
+// ── Tests ──
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use std::collections::BTreeMap;
+
+    use super::*;
 
     #[test]
     fn test_build_native_schema() {

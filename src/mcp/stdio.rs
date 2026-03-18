@@ -1,9 +1,17 @@
-use crate::env;
-use crate::error::ToolshedError;
-use crate::mcp::protocol::*;
-use crate::registry::Tool;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, Command},
+};
+
+use crate::{
+    env,
+    error::ToolshedError,
+    mcp::protocol::{
+        InitializeParams, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpToolDef,
+        ToolCallResult, ToolsCallParams, ToolsListResult,
+    },
+    registry::Tool,
+};
 
 struct McpStdioSession {
     child: Child,
@@ -14,9 +22,21 @@ struct McpStdioSession {
 }
 
 impl McpStdioSession {
-    async fn spawn(tool: &Tool) -> Result<Self, ToolshedError> {
-        let mcp_cfg = tool.manifest.mcp.as_ref().unwrap();
-        let command = mcp_cfg.command.as_ref().unwrap();
+    fn spawn(tool: &Tool) -> Result<Self, ToolshedError> {
+        let mcp_cfg =
+            tool.manifest
+                .mcp
+                .as_ref()
+                .ok_or_else(|| ToolshedError::MissingMcpConfig {
+                    tool: tool.manifest.name.clone(),
+                })?;
+        let command = mcp_cfg
+            .command
+            .as_ref()
+            .ok_or_else(|| ToolshedError::McpSpawnFailed {
+                tool: tool.manifest.name.clone(),
+                reason: "missing command".to_string(),
+            })?;
 
         let env_vars = env::interpolate_map(&mcp_cfg.env)?;
 
@@ -32,8 +52,20 @@ impl McpStdioSession {
             reason: e.to_string(),
         })?;
 
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ToolshedError::McpSpawnFailed {
+                tool: tool.manifest.name.clone(),
+                reason: "stdin not available".to_string(),
+            })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ToolshedError::McpSpawnFailed {
+                tool: tool.manifest.name.clone(),
+                reason: "stdout not available".to_string(),
+            })?;
         let reader = BufReader::new(stdout);
 
         Ok(Self {
@@ -48,13 +80,12 @@ impl McpStdioSession {
     async fn initialize(&mut self) -> Result<(), ToolshedError> {
         let params = InitializeParams::default_params();
         let _response = self
-            .send_request("initialize", Some(serde_json::to_value(params).unwrap()))
+            .send_request("initialize", Some(serde_json::to_value(params)?))
             .await?;
 
         // Send initialized notification
         let notif = JsonRpcNotification::new("notifications/initialized", None);
-        self.send_raw(&serde_json::to_string(&notif).unwrap())
-            .await?;
+        self.send_raw(&serde_json::to_string(&notif)?).await?;
 
         Ok(())
     }
@@ -68,7 +99,7 @@ impl McpStdioSession {
         self.next_id += 1;
 
         let req = JsonRpcRequest::new(id, method, params);
-        let json = serde_json::to_string(&req).unwrap();
+        let json = serde_json::to_string(&req)?;
         self.send_raw(&json).await?;
 
         // Read responses, skipping notifications (no id)
@@ -146,7 +177,7 @@ impl McpStdioSession {
 
 /// List tools from an MCP stdio server.
 pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
-    let mut session = McpStdioSession::spawn(tool).await?;
+    let mut session = McpStdioSession::spawn(tool)?;
     session.initialize().await?;
 
     let mut all_tools = Vec::new();
@@ -178,7 +209,7 @@ pub async fn call_tool(
     arguments: serde_json::Value,
     _timeout: Option<u64>,
 ) -> Result<String, ToolshedError> {
-    let mut session = McpStdioSession::spawn(tool).await?;
+    let mut session = McpStdioSession::spawn(tool)?;
     session.initialize().await?;
 
     let params = ToolsCallParams {
@@ -187,7 +218,7 @@ pub async fn call_tool(
     };
 
     let result = session
-        .send_request("tools/call", Some(serde_json::to_value(params).unwrap()))
+        .send_request("tools/call", Some(serde_json::to_value(params)?))
         .await?;
 
     let call_result: ToolCallResult =

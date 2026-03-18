@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use crate::error::ToolshedError;
 
 /// Parse YAML-style frontmatter delimited by `---` lines.
-/// Returns (metadata_map, body_after_frontmatter).
+/// Returns (`metadata_map`, `body_after_frontmatter`).
+#[allow(clippy::unnecessary_wraps)]
 pub fn parse(content: &str) -> Result<(BTreeMap<String, String>, String), ToolshedError> {
     let trimmed = content.trim_start();
 
@@ -63,15 +64,16 @@ pub fn parse(content: &str) -> Result<(BTreeMap<String, String>, String), Toolsh
 }
 
 fn strip_quotes(s: &str) -> String {
-    if s.len() >= 2 {
-        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-            return s[1..s.len() - 1].to_string();
-        }
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        return s[1..s.len() - 1].to_string();
     }
     s.to_string()
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

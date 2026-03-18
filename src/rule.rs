@@ -1,17 +1,12 @@
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::Path};
 
-use crate::config;
-use crate::error::ToolshedError;
-use crate::frontmatter;
-use crate::manifest;
+use crate::{config, error::ToolshedError, frontmatter, manifest};
 
 const VALID_TYPES: &[&str] = &["guardrail", "permission", "validation", "context"];
 const VALID_SEVERITIES: &[&str] = &["error", "warning", "info"];
 
 #[derive(Debug, Clone)]
 pub struct RuleManifest {
-    pub name: String,
     pub description: String,
     pub rule_type: String,
     pub severity: String,
@@ -20,7 +15,6 @@ pub struct RuleManifest {
 
 #[derive(Debug, Clone)]
 pub struct Rule {
-    pub dir: PathBuf,
     pub manifest: RuleManifest,
     pub body: String,
 }
@@ -49,17 +43,17 @@ impl RuleRegistry {
                 continue;
             }
 
-            let dir_name = match entry.file_name().to_str() {
-                Some(n) => n.to_string(),
-                None => continue,
+            let file_name = entry.file_name();
+            let Some(dir_name) = file_name.to_str() else {
+                continue;
             };
 
-            match load_rule(&path, &dir_name) {
+            match load_rule(&path, dir_name) {
                 Ok(rule) => {
-                    rules.insert(dir_name, rule);
+                    rules.insert(dir_name.to_string(), rule);
                 }
                 Err(e) => {
-                    errors.push((dir_name, e.to_string()));
+                    errors.push((dir_name.to_string(), e.to_string()));
                 }
             }
         }
@@ -68,7 +62,7 @@ impl RuleRegistry {
     }
 }
 
-fn load_rule(dir: &PathBuf, dir_name: &str) -> Result<Rule, ToolshedError> {
+fn load_rule(dir: &Path, dir_name: &str) -> Result<Rule, ToolshedError> {
     let rule_md = dir.join("RULE.md");
 
     if !rule_md.exists() {
@@ -101,16 +95,14 @@ fn load_rule(dir: &PathBuf, dir_name: &str) -> Result<Rule, ToolshedError> {
     // Validate name matches directory
     if name != dir_name {
         return Err(err(format!(
-            "name '{}' does not match directory '{dir_name}'",
-            name
+            "name '{name}' does not match directory '{dir_name}'"
         )));
     }
 
     // Validate name format
     if !manifest::is_valid_name(name) {
         return Err(err(format!(
-            "name must be 1-64 chars, [a-z0-9_-] only, got '{}'",
-            name
+            "name must be 1-64 chars, [a-z0-9_-] only, got '{name}'"
         )));
     }
 
@@ -129,8 +121,7 @@ fn load_rule(dir: &PathBuf, dir_name: &str) -> Result<Rule, ToolshedError> {
         .unwrap_or_else(|| "guardrail".to_string());
     if !VALID_TYPES.contains(&rule_type.as_str()) {
         return Err(err(format!(
-            "type must be one of {:?}, got '{}'",
-            VALID_TYPES, rule_type
+            "type must be one of {VALID_TYPES:?}, got '{rule_type}'"
         )));
     }
 
@@ -141,22 +132,21 @@ fn load_rule(dir: &PathBuf, dir_name: &str) -> Result<Rule, ToolshedError> {
         .unwrap_or_else(|| "error".to_string());
     if !VALID_SEVERITIES.contains(&severity.as_str()) {
         return Err(err(format!(
-            "severity must be one of {:?}, got '{}'",
-            VALID_SEVERITIES, severity
+            "severity must be one of {VALID_SEVERITIES:?}, got '{severity}'"
         )));
     }
 
     // Parse and validate scope (default: global)
-    let scope: Vec<String> = meta
-        .get("scope")
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
-        .unwrap_or_else(|| vec!["global".to_string()]);
+    let scope: Vec<String> = meta.get("scope").map_or_else(
+        || vec!["global".to_string()],
+        |s| s.split(',').map(|p| p.trim().to_string()).collect(),
+    );
 
     for entry in &scope {
         if !is_valid_scope(entry) {
             return Err(err(format!(
-                "invalid scope '{}' — must be 'global' or 'type:name' (tool:x, agent:x, category:x)",
-                entry
+                "invalid scope '{entry}' — must be 'global' or 'type:name' (tool:x, agent:x, \
+                 category:x)"
             )));
         }
     }
@@ -167,9 +157,7 @@ fn load_rule(dir: &PathBuf, dir_name: &str) -> Result<Rule, ToolshedError> {
     }
 
     Ok(Rule {
-        dir: dir.clone(),
         manifest: RuleManifest {
-            name: name.clone(),
             description: description.clone(),
             rule_type,
             severity,

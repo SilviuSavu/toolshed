@@ -1,11 +1,12 @@
-use crate::config;
-use crate::error::ToolshedError;
-use crate::manifest::McpTransport;
-use crate::mcp;
-use crate::mcp::protocol::McpToolDef;
-use crate::registry::Tool;
-use std::path::PathBuf;
-use std::time::SystemTime;
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
+
+use crate::{
+    config, error::ToolshedError, manifest::McpTransport, mcp, mcp::protocol::McpToolDef,
+    registry::Tool,
+};
 
 /// Parsed parameter info for display.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -50,7 +51,13 @@ pub async fn get_mcp_tools(tool: &Tool) -> Result<Vec<McpToolInfo>, ToolshedErro
     }
 
     // Fetch from server
-    let mcp_cfg = tool.manifest.mcp.as_ref().unwrap();
+    let mcp_cfg = tool
+        .manifest
+        .mcp
+        .as_ref()
+        .ok_or_else(|| ToolshedError::MissingMcpConfig {
+            tool: tool.manifest.name.clone(),
+        })?;
     let tool_defs = match mcp_cfg.transport {
         McpTransport::Stdio => mcp::stdio::list_tools(tool).await?,
         McpTransport::Http => mcp::http::list_tools(tool).await?,
@@ -74,7 +81,7 @@ fn convert_tool_def(def: &McpToolDef) -> McpToolInfo {
                 .and_then(|r| r.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -88,7 +95,7 @@ fn convert_tool_def(def: &McpToolDef) -> McpToolInfo {
                 let description = prop
                     .get("description")
                     .and_then(|d| d.as_str())
-                    .map(|s| s.to_string());
+                    .map(std::string::ToString::to_string);
                 let required = required_list.contains(name);
 
                 params.push(ParamInfo {
@@ -108,9 +115,16 @@ fn convert_tool_def(def: &McpToolDef) -> McpToolInfo {
     }
 }
 
-/// Get raw MCP tool definitions with input_schema intact (no lossy conversion).
+/// Get raw MCP tool definitions with `input_schema` intact (no lossy
+/// conversion).
 pub async fn get_raw_mcp_tool_defs(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
-    let mcp_cfg = tool.manifest.mcp.as_ref().unwrap();
+    let mcp_cfg = tool
+        .manifest
+        .mcp
+        .as_ref()
+        .ok_or_else(|| ToolshedError::MissingMcpConfig {
+            tool: tool.manifest.name.clone(),
+        })?;
     match mcp_cfg.transport {
         McpTransport::Stdio => mcp::stdio::list_tools(tool).await,
         McpTransport::Http => mcp::http::list_tools(tool).await,
@@ -121,7 +135,7 @@ fn cache_path_for(tool: &Tool) -> PathBuf {
     config::cache_dir().join(format!("{}.tools.json", tool.manifest.name))
 }
 
-fn read_cache(path: &PathBuf) -> Option<Vec<McpToolInfo>> {
+fn read_cache(path: &Path) -> Option<Vec<McpToolInfo>> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
     let age = SystemTime::now().duration_since(modified).ok()?;
@@ -134,7 +148,7 @@ fn read_cache(path: &PathBuf) -> Option<Vec<McpToolInfo>> {
     serde_json::from_str(&content).ok()
 }
 
-fn write_cache(path: &PathBuf, tools: &[McpToolInfo]) {
+fn write_cache(path: &Path, tools: &[McpToolInfo]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
