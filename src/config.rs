@@ -1,18 +1,25 @@
 use std::path::PathBuf;
 
 pub const DEFAULT_MAX_OUTPUT: usize = 4096;
-pub const DEFAULT_IDLE_TIMEOUT: u64 = 300;
-pub const HEALTH_CACHE_TTL_SECS: u64 = 30;
 pub const INTROSPECT_CACHE_TTL_SECS: u64 = 3600;
 pub const HEALTH_CHECK_TIMEOUT_SECS: u64 = 15;
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
+
+// Daemon constants
+pub const HEALTH_INTERVAL_SECS: u64 = 30;
+pub const MAX_RECOVERY_ATTEMPTS: u8 = 3;
+pub const RECOVERY_BACKOFF: [u64; 3] = [0, 2, 12];
+pub const AUTH_REFRESH_RATIO: f64 = 0.8;
+pub const AUTH_DEFAULT_TTL_SECS: u64 = 3600;
+pub const AUTH_RETRY_ATTEMPTS: u8 = 3;
+pub const GRACE_PERIOD_CYCLES: u64 = 1;
 
 pub fn toolshed_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("TOOLSHED_DIR") {
         return PathBuf::from(dir);
     }
     dirs::home_dir()
-        .expect("cannot determine home directory")
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".toolshed")
 }
 

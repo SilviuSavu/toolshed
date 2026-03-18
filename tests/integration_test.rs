@@ -1,6 +1,9 @@
-use assert_cmd::Command;
-use predicates::prelude::*;
+#![allow(clippy::unwrap_used)]
+
 use std::path::PathBuf;
+
+use assert_cmd::{cargo_bin_cmd, Command};
+use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn fixtures_dir() -> PathBuf {
@@ -8,7 +11,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn cmd_with_toolshed_dir(dir: &str) -> Command {
-    let mut cmd = Command::cargo_bin("toolshed").unwrap();
+    let mut cmd = cargo_bin_cmd!("toolshed");
     cmd.env("TOOLSHED_DIR", dir);
     cmd
 }
@@ -79,20 +82,20 @@ fn setup_fixture_toolshed() -> (TempDir, PathBuf) {
     (tmp, dir)
 }
 
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
-    std::fs::create_dir_all(dst).unwrap();
+fn copy_dir_recursive(src: &std::path::Path, target: &std::path::Path) {
+    std::fs::create_dir_all(target).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {
         let entry = entry.unwrap();
-        let dest = dst.join(entry.file_name());
+        let dest = target.join(entry.file_name());
         if entry.path().is_dir() {
-            copy_dir_recursive(&entry.path(), &dest);
+            copy_dir_recursive(entry.path().as_path(), &dest);
         } else {
-            std::fs::copy(&entry.path(), &dest).unwrap();
+            std::fs::copy(entry.path(), &dest).unwrap();
             // Preserve executable bit
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&entry.path()) {
+                if let Ok(meta) = std::fs::metadata(entry.path()) {
                     let mode = meta.permissions().mode();
                     if mode & 0o111 != 0 {
                         let _ =
