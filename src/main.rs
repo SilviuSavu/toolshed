@@ -2,6 +2,7 @@ mod agent;
 mod audit;
 mod cli;
 mod config;
+mod daemon;
 mod env;
 mod error;
 mod frontmatter;
@@ -16,11 +17,13 @@ mod serve;
 mod skill;
 mod workflow;
 
+use std::process;
+
 use clap::Parser;
 use cli::{Cli, Command};
 use error::ToolshedError;
-use std::process;
 
+#[allow(clippy::print_stderr)]
 fn main() {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -48,25 +51,28 @@ async fn run(cli: Cli) -> Result<(), ToolshedError> {
             full,
             timeout,
         } => cmd_run(&tool, &command, &args, full, timeout).await,
+        #[allow(clippy::print_stderr)]
         Command::Status => {
             eprintln!("status: not yet implemented (v2)");
             Ok(())
         }
+        #[allow(clippy::print_stderr)]
         Command::Stop { .. } => {
             eprintln!("stop: not yet implemented (v2)");
             Ok(())
         }
-        Command::Validate { tool } => cmd_validate(tool.as_deref()).await,
-        Command::AgentPrompt { format } => cmd_agent_prompt(&format).await,
-        Command::Skill { action } => cmd_skill(action).await,
-        Command::Agent { action } => cmd_agent(action).await,
-        Command::Rule { action } => cmd_rule(action).await,
+        Command::Validate { tool } => cmd_validate(tool.as_deref()),
+        Command::AgentPrompt { format } => cmd_agent_prompt(&format),
+        Command::Skill { action } => cmd_skill(action),
+        Command::Agent { action } => cmd_agent(action),
+        Command::Rule { action } => cmd_rule(action),
         Command::Workflow { action } => cmd_workflow(action).await,
         Command::Serve { port, category } => serve::serve(port, category).await,
-        Command::Audit { action } => cmd_audit(action, cli.own_audit_trail).await,
+        Command::Audit { action } => cmd_audit(action, cli.own_audit_trail),
     }
 }
 
+#[allow(clippy::print_stdout)]
 async fn cmd_list(category: Option<String>, show_health: bool) -> Result<(), ToolshedError> {
     let reg = registry::Registry::load()?;
 
@@ -95,7 +101,7 @@ async fn cmd_list(category: Option<String>, show_health: bool) -> Result<(), Too
             }
             let tool_word = if total == 1 { "tool" } else { "tools" };
             if unconfigured == total {
-                println!("{:<20} {total} {tool_word}  (health not configured)", cat);
+                println!("{cat:<20} {total} {tool_word}  (health not configured)");
             } else {
                 let parts: Vec<String> = [
                     (up > 0).then(|| format!("{up} up")),
@@ -111,7 +117,7 @@ async fn cmd_list(category: Option<String>, show_health: bool) -> Result<(), Too
         for (cat, names) in &reg.by_category {
             let n = names.len();
             let word = if n == 1 { "tool" } else { "tools" };
-            println!("{:<20} {n} {word}", cat);
+            println!("{cat:<20} {n} {word}");
         }
     }
 
@@ -139,6 +145,7 @@ async fn cmd_help(tool_name: &str, command: Option<&str>) -> Result<(), Toolshed
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 async fn print_native_help(
     tool: &registry::Tool,
     _command_filter: Option<&str>,
@@ -215,6 +222,7 @@ async fn print_native_help(
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 async fn print_mcp_help(tool: &registry::Tool) -> Result<(), ToolshedError> {
     let m = &tool.manifest;
     let mcp_cfg = m
@@ -261,6 +269,7 @@ async fn print_mcp_help(tool: &registry::Tool) -> Result<(), ToolshedError> {
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 async fn cmd_run(
     tool_name: &str,
     command: &str,
@@ -285,7 +294,7 @@ async fn cmd_run(
         "tool",
         "tool_call",
         "user",
-        serde_json::json!({
+        &serde_json::json!({
             "tool": tool_name,
             "command": command,
             "args": args,
@@ -297,7 +306,7 @@ async fn cmd_run(
 
     let start = std::time::Instant::now();
     let result = runner::run(tool, command, args, timeout).await;
-    let duration_ms = start.elapsed().as_millis() as u64;
+    let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     // Audit: record tool_result
     match &result {
@@ -306,7 +315,7 @@ async fn cmd_run(
                 "tool",
                 "tool_result",
                 "user",
-                serde_json::json!({
+                &serde_json::json!({
                     "tool": tool_name,
                     "command": command,
                     "durationMs": duration_ms,
@@ -320,7 +329,7 @@ async fn cmd_run(
                 "tool",
                 "tool_result",
                 "user",
-                serde_json::json!({
+                &serde_json::json!({
                     "tool": tool_name,
                     "command": command,
                     "durationMs": duration_ms,
@@ -343,7 +352,8 @@ async fn cmd_run(
     Ok(())
 }
 
-async fn cmd_validate(tool_filter: Option<&str>) -> Result<(), ToolshedError> {
+#[allow(clippy::print_stdout)]
+fn cmd_validate(tool_filter: Option<&str>) -> Result<(), ToolshedError> {
     let reg = registry::Registry::load()?;
 
     let mut has_errors = false;
@@ -376,7 +386,8 @@ async fn cmd_validate(tool_filter: Option<&str>) -> Result<(), ToolshedError> {
     Ok(())
 }
 
-async fn cmd_skill(action: cli::SkillAction) -> Result<(), ToolshedError> {
+#[allow(clippy::print_stdout)]
+fn cmd_skill(action: cli::SkillAction) -> Result<(), ToolshedError> {
     let reg = skill::SkillRegistry::load()?;
 
     match action {
@@ -423,7 +434,8 @@ async fn cmd_skill(action: cli::SkillAction) -> Result<(), ToolshedError> {
     Ok(())
 }
 
-async fn cmd_agent(action: cli::AgentAction) -> Result<(), ToolshedError> {
+#[allow(clippy::print_stdout)]
+fn cmd_agent(action: cli::AgentAction) -> Result<(), ToolshedError> {
     let reg = agent::AgentRegistry::load()?;
 
     match action {
@@ -433,7 +445,7 @@ async fn cmd_agent(action: cli::AgentAction) -> Result<(), ToolshedError> {
                     .manifest
                     .model
                     .as_deref()
-                    .map(|m| format!("  [{}]", m))
+                    .map(|m| format!("  [{m}]"))
                     .unwrap_or_default();
                 println!("{:<24} {}{}", name, a.manifest.description, model_str);
             }
@@ -476,7 +488,8 @@ async fn cmd_agent(action: cli::AgentAction) -> Result<(), ToolshedError> {
     Ok(())
 }
 
-async fn cmd_rule(action: cli::RuleAction) -> Result<(), ToolshedError> {
+#[allow(clippy::print_stdout)]
+fn cmd_rule(action: cli::RuleAction) -> Result<(), ToolshedError> {
     let reg = rule::RuleRegistry::load()?;
 
     match action {
@@ -526,6 +539,7 @@ async fn cmd_rule(action: cli::RuleAction) -> Result<(), ToolshedError> {
     Ok(())
 }
 
+#[allow(clippy::print_stdout, clippy::print_stderr, clippy::too_many_lines)]
 async fn cmd_workflow(action: cli::WorkflowAction) -> Result<(), ToolshedError> {
     let wf_reg = workflow::WorkflowRegistry::load()?;
 
@@ -612,7 +626,7 @@ async fn cmd_workflow(action: cli::WorkflowAction) -> Result<(), ToolshedError> 
                 "workflow",
                 "workflow_run",
                 "user",
-                serde_json::json!({
+                &serde_json::json!({
                     "workflow": &name,
                     "steps": wf.steps.len(),
                     "timeout": timeout.unwrap_or(wf.manifest.timeout),
@@ -623,15 +637,15 @@ async fn cmd_workflow(action: cli::WorkflowAction) -> Result<(), ToolshedError> 
 
             let start = std::time::Instant::now();
             let result = workflow::execute(wf, &reg, verbose, full, timeout).await;
-            let duration_ms = start.elapsed().as_millis() as u64;
+            let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-            match &result {
+            match result {
                 Ok(output) => {
                     logger.record(
                         "workflow",
                         "workflow_result",
                         "user",
-                        serde_json::json!({
+                        &serde_json::json!({
                             "workflow": &name,
                             "durationMs": duration_ms,
                             "outputLen": output.len(),
@@ -641,18 +655,19 @@ async fn cmd_workflow(action: cli::WorkflowAction) -> Result<(), ToolshedError> 
                     print!("{output}");
                 }
                 Err(e) => {
+                    let msg = e.to_string();
                     logger.record(
                         "workflow",
                         "workflow_result",
                         "user",
-                        serde_json::json!({
+                        &serde_json::json!({
                             "workflow": &name,
                             "durationMs": duration_ms,
-                            "error": e.to_string(),
+                            "error": msg,
                         }),
                         Some("error".to_string()),
                     );
-                    return Err(result.unwrap_err());
+                    return Err(e);
                 }
             }
         }
@@ -661,7 +676,8 @@ async fn cmd_workflow(action: cli::WorkflowAction) -> Result<(), ToolshedError> 
     Ok(())
 }
 
-async fn cmd_agent_prompt(format: &str) -> Result<(), ToolshedError> {
+#[allow(clippy::print_stdout, clippy::too_many_lines)]
+fn cmd_agent_prompt(format: &str) -> Result<(), ToolshedError> {
     let reg = registry::Registry::load()?;
     let skill_reg = skill::SkillRegistry::load()?;
     let agent_reg = agent::AgentRegistry::load()?;
@@ -803,7 +819,11 @@ toolshed run <tool> <command> [args...]
                 wf.manifest.description
             ));
         }
-        lines.push("\nUse `toolshed workflow show <name>` to see steps. Use `toolshed workflow run <name>` to execute.".to_string());
+        lines.push(
+            "\nUse `toolshed workflow show <name>` to see steps. Use `toolshed workflow run \
+             <name>` to execute."
+                .to_string(),
+        );
         lines.join("\n")
     };
 
@@ -830,9 +850,9 @@ toolshed run <tool> <command> [args...]
     Ok(())
 }
 
-async fn cmd_audit(action: cli::AuditAction, own_audit_trail: bool) -> Result<(), ToolshedError> {
+fn cmd_audit(action: cli::AuditAction, own_audit_trail: bool) -> Result<(), ToolshedError> {
     if !own_audit_trail {
-        return cmd_audit_exec(action).await;
+        return cmd_audit_exec(action);
     }
 
     // Meta-audit: log the audit operation itself
@@ -840,11 +860,11 @@ async fn cmd_audit(action: cli::AuditAction, own_audit_trail: bool) -> Result<()
     let mut logger = audit::AuditLogger::new(&session_id);
 
     let (event_name, event_data) = audit_action_metadata(&action);
-    logger.record("audit", event_name, "user", event_data, None);
+    logger.record("audit", event_name, "user", &event_data, None);
 
     let start = std::time::Instant::now();
-    let result = cmd_audit_exec(action).await;
-    let duration_ms = start.elapsed().as_millis() as u64;
+    let result = cmd_audit_exec(action);
+    let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     match &result {
         Ok(()) => {
@@ -852,7 +872,7 @@ async fn cmd_audit(action: cli::AuditAction, own_audit_trail: bool) -> Result<()
                 "audit",
                 "audit_result",
                 "user",
-                serde_json::json!({
+                &serde_json::json!({
                     "action": event_name,
                     "durationMs": duration_ms,
                 }),
@@ -864,7 +884,7 @@ async fn cmd_audit(action: cli::AuditAction, own_audit_trail: bool) -> Result<()
                 "audit",
                 "audit_result",
                 "user",
-                serde_json::json!({
+                &serde_json::json!({
                     "action": event_name,
                     "durationMs": duration_ms,
                     "error": e.to_string(),
@@ -909,7 +929,8 @@ fn audit_action_metadata(action: &cli::AuditAction) -> (&'static str, serde_json
     }
 }
 
-async fn cmd_audit_exec(action: cli::AuditAction) -> Result<(), ToolshedError> {
+#[allow(clippy::print_stdout)]
+fn cmd_audit_exec(action: cli::AuditAction) -> Result<(), ToolshedError> {
     let dir = config::audit_dir();
 
     match action {
