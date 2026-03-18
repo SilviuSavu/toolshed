@@ -43,9 +43,6 @@ pub enum ToolshedError {
     #[error("failed to spawn MCP server for '{tool}': {reason}")]
     McpSpawnFailed { tool: String, reason: String },
 
-    #[error("MCP initialization failed for '{tool}': {reason}")]
-    McpInitFailed { tool: String, reason: String },
-
     #[error("MCP RPC error for '{tool}': [{code}] {message}")]
     McpRpcError {
         tool: String,
@@ -104,6 +101,18 @@ pub enum ToolshedError {
     #[error("environment variable not set: {var}")]
     EnvVarNotSet { var: String },
 
+    #[error("vault request failed: {reason}")]
+    VaultError { reason: String },
+
+    #[error("vault auth failed: {reason}")]
+    VaultAuthFailed { reason: String },
+
+    #[error("tool recovery exhausted for '{tool}': {reason}")]
+    RecoveryExhausted { tool: String, reason: String },
+
+    #[error("daemon health probe failed for '{tool}': {reason}")]
+    HealthProbeFailed { tool: String, reason: String },
+
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
@@ -115,7 +124,7 @@ pub enum ToolshedError {
 }
 
 impl ToolshedError {
-    pub fn exit_code(&self) -> i32 {
+    pub const fn exit_code(&self) -> i32 {
         match self {
             Self::ToolNotFound { .. }
             | Self::CategoryNotFound { .. }
@@ -131,7 +140,8 @@ impl ToolshedError {
             | Self::McpRpcError { .. }
             | Self::McpCrashed { .. }
             | Self::McpHttpError { .. }
-            | Self::WorkflowStepFailed { .. } => 2,
+            | Self::WorkflowStepFailed { .. }
+            | Self::HealthProbeFailed { .. } => 2,
 
             Self::BadManifest { .. }
             | Self::MissingRunScript { .. }
@@ -145,6 +155,9 @@ impl ToolshedError {
             Self::ToolTimeout { .. } | Self::WorkflowTimeout { .. } => 4,
 
             Self::AuditChainBroken { .. } | Self::EnvVarNotSet { .. } => 5,
+
+            Self::VaultError { .. } | Self::VaultAuthFailed { .. } => 6,
+            Self::RecoveryExhausted { .. } => 7,
 
             _ => 99,
         }
