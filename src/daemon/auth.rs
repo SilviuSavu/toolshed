@@ -4,37 +4,12 @@ use std::{
 };
 
 use secrecy::SecretString;
-use serde::Deserialize;
 
 use crate::{
     config::{AUTH_DEFAULT_TTL_SECS, AUTH_REFRESH_RATIO},
     daemon::state::SecretEntry,
     error::ToolshedError,
 };
-
-/// Vault KV v2 response shape.
-#[derive(Debug, Deserialize)]
-struct VaultResponse {
-    data: VaultDataWrapper,
-    lease_duration: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct VaultDataWrapper {
-    data: HashMap<String, String>,
-}
-
-/// Vault `AppRole` login response.
-#[derive(Debug, Deserialize)]
-struct VaultAuthResponse {
-    auth: VaultAuth,
-}
-
-#[derive(Debug, Deserialize)]
-struct VaultAuth {
-    client_token: String,
-    lease_duration: u64,
-}
 
 /// Maps a Vault path/key to an env var name.
 #[derive(Debug, Clone)]
@@ -116,23 +91,26 @@ pub async fn vault_get(
         });
     }
 
-    let body: VaultResponse = resp.json().await.map_err(|e| ToolshedError::VaultError {
+    let body: serde_json::Value = resp.json().await.map_err(|e| ToolshedError::VaultError {
         reason: format!("failed to parse Vault response for {path}: {e}"),
     })?;
 
+    let lease_duration = body.get("lease_duration").and_then(serde_json::Value::as_u64).unwrap_or(0);
+
     let value = body
-        .data
-        .data
-        .get(key)
+        .get("data")
+        .and_then(|d| d.get("data"))
+        .and_then(|d| d.get(key))
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| ToolshedError::VaultError {
             reason: format!("key '{key}' not found in secret '{path}'"),
         })?
-        .clone();
+        .to_string();
 
-    let ttl = if body.lease_duration == 0 {
+    let ttl = if lease_duration == 0 {
         Duration::from_secs(AUTH_DEFAULT_TTL_SECS)
     } else {
-        Duration::from_secs(body.lease_duration)
+        Duration::from_secs(lease_duration)
     };
 
     Ok((value, ttl))
@@ -167,15 +145,28 @@ pub async fn vault_approle_login(
         });
     }
 
-    let auth_resp: VaultAuthResponse =
+    let auth_body: serde_json::Value =
         resp.json()
             .await
             .map_err(|e| ToolshedError::VaultAuthFailed {
                 reason: format!("failed to parse AppRole response: {e}"),
             })?;
 
-    let ttl = Duration::from_secs(auth_resp.auth.lease_duration);
-    Ok((auth_resp.auth.client_token, ttl))
+    let auth = auth_body.get("auth").ok_or(ToolshedError::VaultAuthFailed {
+        reason: "missing 'auth' in AppRole response".to_string(),
+    })?;
+
+    let client_token = auth
+        .get("client_token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ToolshedError::VaultAuthFailed {
+            reason: "missing 'client_token' in AppRole response".to_string(),
+        })?
+        .to_string();
+
+    let lease_duration = auth.get("lease_duration").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let ttl = Duration::from_secs(lease_duration);
+    Ok((client_token, ttl))
 }
 
 /// Resolve all secrets from Vault and build `SecretEntry` map.

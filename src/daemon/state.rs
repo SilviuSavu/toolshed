@@ -4,10 +4,8 @@ use std::{
 };
 
 use secrecy::SecretString;
-use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Up,
     Down,
