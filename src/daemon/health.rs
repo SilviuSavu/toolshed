@@ -4,11 +4,10 @@ use tokio::{sync::RwLock, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::{GRACE_PERIOD_CYCLES, HEALTH_CHECK_TIMEOUT_SECS, HEALTH_INTERVAL_SECS},
+    config::{COLD_TIER_CYCLE_MULTIPLIER, GRACE_PERIOD_CYCLES, HEALTH_INTERVAL_SECS},
     daemon::state::{DaemonState, Status, ToolStatus},
     health,
-    manifest::ToolType,
-    mcp,
+    manifest::HealthTier,
     registry::{Registry, Tool},
 };
 
@@ -21,88 +20,54 @@ pub struct ProbeResult {
 }
 
 /// Run a single health probe for a tool.
-pub async fn probe_tool(tool: &Tool, daemon_state: Option<&DaemonState>) -> ProbeResult {
+pub async fn probe_tool(tool: &Tool, _daemon_state: Option<&DaemonState>) -> ProbeResult {
     let name = tool.manifest.name.clone();
 
-    // Tools with a health command: use existing `health::check_one`
-    if tool.manifest.health.is_some() {
-        let result = health::check_one(tool).await;
+    // All tools must have a health command (enforced at registry load).
+    let Some(ref _health_cmd) = tool.manifest.health else {
         return ProbeResult {
             tool_name: name,
-            healthy: result.unwrap_or(false),
-            error: if result == Some(false) {
-                Some("health command failed".to_string())
-            } else {
-                None
-            },
+            healthy: false,
+            error: Some("no health command configured".to_string()),
         };
-    }
+    };
 
-    // MCP tools without health command: `tools/list` fallback
-    if tool.manifest.tool_type == ToolType::Mcp {
-        let result = tokio::time::timeout(
-            Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS),
-            probe_mcp_tools_list(tool, daemon_state),
-        )
-        .await;
-
-        return match result {
-            Ok(Ok(())) => ProbeResult {
-                tool_name: name,
-                healthy: true,
-                error: None,
-            },
-            Ok(Err(e)) => ProbeResult {
-                tool_name: name,
-                healthy: false,
-                error: Some(e.to_string()),
-            },
-            Err(_) => ProbeResult {
-                tool_name: name,
-                healthy: false,
-                error: Some("probe timed out".to_string()),
-            },
-        };
-    }
-
-    // Native tools without health command: assumed healthy
-    ProbeResult {
-        tool_name: name,
-        healthy: true,
-        error: None,
+    match health::check_one(tool).await {
+        Some(true) => ProbeResult { tool_name: name, healthy: true, error: None },
+        Some(false) => ProbeResult {
+            tool_name: name,
+            healthy: false,
+            error: Some("health command failed".to_string()),
+        },
+        None => ProbeResult {
+            tool_name: name,
+            healthy: false,
+            error: Some("health check returned no result".to_string()),
+        },
     }
 }
 
-/// Probe an MCP tool by spawning a session and calling `tools/list`.
-async fn probe_mcp_tools_list(
-    tool: &Tool,
-    _daemon_state: Option<&DaemonState>,
-) -> Result<(), crate::error::ToolshedError> {
-    let mcp_cfg = tool.manifest.mcp.as_ref().ok_or_else(|| {
-        crate::error::ToolshedError::MissingMcpConfig {
-            tool: tool.manifest.name.clone(),
-        }
-    })?;
-    match mcp_cfg.transport {
-        crate::manifest::McpTransport::Stdio => {
-            let _tools = mcp::stdio::list_tools(tool).await?;
-        }
-        crate::manifest::McpTransport::Http => {
-            let _tools = mcp::http::list_tools(tool).await?;
-        }
+/// Determine whether a tool should be probed this cycle based on its tier.
+const fn should_probe_tier(tier: Option<HealthTier>, cycle: u64) -> bool {
+    match tier {
+        Some(HealthTier::Cold) => cycle.is_multiple_of(COLD_TIER_CYCLE_MULTIPLIER),
+        Some(HealthTier::Hot) | None => true,
     }
-    Ok(())
 }
 
 /// Run all health probes in parallel.
 pub async fn probe_all(
     registry: &Registry,
     daemon_state: &Arc<RwLock<DaemonState>>,
+    cycle: u64,
 ) -> Vec<ProbeResult> {
     let state_arc = daemon_state.clone();
     let mut join_set = JoinSet::new();
 
     for tool in registry.tools.values() {
+        if !should_probe_tier(tool.manifest.tier, cycle) {
+            continue;
+        }
         let tool_clone = tool.clone();
         let st = state_arc.clone();
         join_set.spawn(async move {
@@ -125,6 +90,7 @@ pub async fn run_health_loop(
     cancel: CancellationToken,
     recovery_tx: tokio::sync::mpsc::Sender<String>,
 ) {
+    let mut cycle: u64 = 0;
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -143,7 +109,7 @@ pub async fn run_health_loop(
                 .collect()
         };
 
-        let results = probe_all(&registry, &daemon_state).await;
+        let results = probe_all(&registry, &daemon_state, cycle).await;
 
         let recovery_targets: Vec<String>;
         {
@@ -192,10 +158,12 @@ pub async fn run_health_loop(
         for target in &recovery_targets {
             let _ = recovery_tx.send(target.clone()).await;
         }
+        cycle = cycle.wrapping_add(1);
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -208,5 +176,55 @@ mod tests {
         };
         assert!(pr.healthy);
         assert!(pr.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_tool_without_health_is_unhealthy() {
+        use crate::manifest::{ToolManifest, ToolType};
+        use crate::registry::Tool;
+        use std::collections::BTreeMap;
+
+        let tool = Tool {
+            dir: std::path::PathBuf::from("/tmp/fake"),
+            manifest: ToolManifest {
+                name: "no-health-tool".to_string(),
+                description: "Test".to_string(),
+                category: "test".to_string(),
+                tool_type: ToolType::Mcp,
+                max_output: 4096,
+                health: None,
+                tier: None,
+                commands: BTreeMap::new(),
+                mcp: None,
+            },
+            run_path: None,
+        };
+        let result = probe_tool(&tool, None).await;
+        assert!(!result.healthy);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn should_probe_hot_every_cycle() {
+        assert!(should_probe_tier(Some(HealthTier::Hot), 0));
+        assert!(should_probe_tier(Some(HealthTier::Hot), 1));
+        assert!(should_probe_tier(Some(HealthTier::Hot), 9));
+        assert!(should_probe_tier(Some(HealthTier::Hot), 10));
+    }
+
+    #[test]
+    fn should_probe_cold_only_on_multiplier() {
+        assert!(should_probe_tier(Some(HealthTier::Cold), 0));
+        assert!(!should_probe_tier(Some(HealthTier::Cold), 1));
+        assert!(!should_probe_tier(Some(HealthTier::Cold), 9));
+        assert!(should_probe_tier(Some(HealthTier::Cold), 10));
+        assert!(!should_probe_tier(Some(HealthTier::Cold), 11));
+        assert!(should_probe_tier(Some(HealthTier::Cold), 20));
+    }
+
+    #[test]
+    fn should_probe_no_tier_every_cycle() {
+        assert!(should_probe_tier(None, 0));
+        assert!(should_probe_tier(None, 5));
     }
 }
