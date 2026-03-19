@@ -161,6 +161,23 @@ impl<'de> serde::Deserialize<'de> for McpConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthTier {
+    Hot,
+    Cold,
+}
+
+impl<'de> serde::Deserialize<'de> for HealthTier {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "hot" => Ok(Self::Hot),
+            "cold" => Ok(Self::Cold),
+            other => Err(serde::de::Error::unknown_variant(other, &["hot", "cold"])),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolManifest {
     pub name: String,
@@ -169,6 +186,7 @@ pub struct ToolManifest {
     pub tool_type: ToolType,
     pub max_output: usize,
     pub health: Option<String>,
+    pub tier: Option<HealthTier>,
     pub commands: BTreeMap<String, CommandDef>,
     pub mcp: Option<McpConfig>,
 }
@@ -189,12 +207,14 @@ impl<'de> serde::Deserialize<'de> for ToolManifest {
             .and_then(|v| usize::try_from(v).ok())
             .unwrap_or(DEFAULT_MAX_OUTPUT);
         let health = obj.get("health").and_then(serde_json::Value::as_str).map(String::from);
+        let tier = obj.get("tier").map(|v| HealthTier::deserialize(v.clone()))
+            .transpose().map_err(serde::de::Error::custom)?;
         let commands = obj.get("commands").map_or_else(|| Ok(BTreeMap::new()), |v| {
             BTreeMap::<String, CommandDef>::deserialize(v.clone()).map_err(serde::de::Error::custom)
         })?;
         let mcp = obj.get("mcp").map(|v| McpConfig::deserialize(v.clone()))
             .transpose().map_err(serde::de::Error::custom)?;
-        Ok(Self { name, description, category, tool_type, max_output, health, commands, mcp })
+        Ok(Self { name, description, category, tool_type, max_output, health, tier, commands, mcp })
     }
 }
 
@@ -485,6 +505,27 @@ mod tests {
         let m: ToolManifest = serde_json::from_str(json).unwrap();
         let err = m.validate("x").unwrap_err();
         assert!(err.to_string().contains("requires 'url'"));
+    }
+
+    #[test]
+    fn manifest_tier_defaults_to_none() {
+        let json = r#"{"name":"t","description":"T","category":"test","type":"native","commands":{"x":{"description":"x"}}}"#;
+        let m: ToolManifest = serde_json::from_str(json).unwrap();
+        assert!(m.tier.is_none());
+    }
+
+    #[test]
+    fn manifest_tier_parses_hot() {
+        let json = r#"{"name":"t","description":"T","category":"test","type":"native","tier":"hot","commands":{"x":{"description":"x"}}}"#;
+        let m: ToolManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.tier, Some(HealthTier::Hot));
+    }
+
+    #[test]
+    fn manifest_tier_parses_cold() {
+        let json = r#"{"name":"t","description":"T","category":"test","type":"native","tier":"cold","commands":{"x":{"description":"x"}}}"#;
+        let m: ToolManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.tier, Some(HealthTier::Cold));
     }
 
     #[test]
