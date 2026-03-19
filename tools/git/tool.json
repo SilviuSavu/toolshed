@@ -1,0 +1,13 @@
+{
+  "name": "git",
+  "description": "Git repository operations — status, diff, log, show, blame, branches, tags",
+  "category": "version-control",
+  "type": "mcp",
+  "max_output": 32768,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-git"],
+    "env": {}
+  }
+}

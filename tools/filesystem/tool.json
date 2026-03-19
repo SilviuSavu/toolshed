@@ -1,0 +1,13 @@
+{
+  "name": "filesystem",
+  "description": "File read/write/search operations in project workspaces",
+  "category": "filesystem",
+  "type": "mcp",
+  "max_output": 32768,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspaces"],
+    "env": {}
+  }
+}

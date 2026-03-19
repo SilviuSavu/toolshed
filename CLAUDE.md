@@ -8,6 +8,9 @@ cargo build
 cargo test
 ```
 
+## Formatting
+The pre-edit hook validates with **stable `cargo fmt`** (not nightly). No custom rustfmt config options — just default stable formatting. If you need to reformat, run `cargo fmt --all`.
+
 ## Architecture
 - `src/cli.rs` — Clap derive structs
 - `src/config.rs` — Path resolution (~/.toolshed/)

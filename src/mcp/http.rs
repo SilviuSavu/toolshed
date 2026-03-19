@@ -13,7 +13,18 @@ pub async fn call_tool(
     tool: &Tool,
     tool_name: &str,
     arguments: serde_json::Value,
+    timeout: Option<u64>,
+) -> Result<String, ToolshedError> {
+    call_tool_with_state(tool, tool_name, arguments, timeout, None).await
+}
+
+/// Call a tool, resolving env vars from daemon state when available.
+pub async fn call_tool_with_state(
+    tool: &Tool,
+    tool_name: &str,
+    arguments: serde_json::Value,
     _timeout: Option<u64>,
+    daemon_state: Option<&crate::daemon::state::DaemonState>,
 ) -> Result<String, ToolshedError> {
     let mcp_cfg = tool
         .manifest
@@ -29,7 +40,7 @@ pub async fn call_tool(
             tool: tool.manifest.name.clone(),
             reason: "missing url".to_string(),
         })?;
-    let headers = env::interpolate_map(&mcp_cfg.headers)?;
+    let headers = env::interpolate_map_with_state(&mcp_cfg.headers, None)?;
 
     let client = reqwest::Client::builder()
         .build()
@@ -133,6 +144,14 @@ pub async fn call_tool(
 
 /// List tools via MCP HTTP.
 pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
+    list_tools_with_state(tool, None).await
+}
+
+/// List tools, resolving env vars from daemon state when available.
+pub async fn list_tools_with_state(
+    tool: &Tool,
+    daemon_state: Option<&crate::daemon::state::DaemonState>,
+) -> Result<Vec<McpToolDef>, ToolshedError> {
     let mcp_cfg = tool
         .manifest
         .mcp
@@ -147,7 +166,7 @@ pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
             tool: tool.manifest.name.clone(),
             reason: "missing url".to_string(),
         })?;
-    let headers = env::interpolate_map(&mcp_cfg.headers)?;
+    let headers = env::interpolate_map_with_state(&mcp_cfg.headers, None)?;
 
     let client = reqwest::Client::builder()
         .build()

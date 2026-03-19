@@ -4,6 +4,7 @@ use tokio::{
 };
 
 use crate::{
+    daemon::state::DaemonState,
     env,
     error::ToolshedError,
     mcp::protocol::{
@@ -22,7 +23,7 @@ struct McpStdioSession {
 }
 
 impl McpStdioSession {
-    fn spawn(tool: &Tool) -> Result<Self, ToolshedError> {
+    fn spawn(tool: &Tool, daemon_state: Option<&DaemonState>) -> Result<Self, ToolshedError> {
         let mcp_cfg =
             tool.manifest
                 .mcp
@@ -38,7 +39,7 @@ impl McpStdioSession {
                 reason: "missing command".to_string(),
             })?;
 
-        let env_vars = env::interpolate_map(&mcp_cfg.env)?;
+        let env_vars = env::interpolate_map_with_state(&mcp_cfg.env, daemon_state)?;
 
         let mut cmd = Command::new(command);
         cmd.args(&mcp_cfg.args);
@@ -177,7 +178,15 @@ impl McpStdioSession {
 
 /// List tools from an MCP stdio server.
 pub async fn list_tools(tool: &Tool) -> Result<Vec<McpToolDef>, ToolshedError> {
-    let mut session = McpStdioSession::spawn(tool)?;
+    list_tools_with_state(tool, None).await
+}
+
+/// List tools, resolving env vars from daemon state when available.
+pub async fn list_tools_with_state(
+    tool: &Tool,
+    daemon_state: Option<&DaemonState>,
+) -> Result<Vec<McpToolDef>, ToolshedError> {
+    let mut session = McpStdioSession::spawn(tool, daemon_state)?;
     session.initialize().await?;
 
     let mut all_tools = Vec::new();
@@ -207,9 +216,20 @@ pub async fn call_tool(
     tool: &Tool,
     tool_name: &str,
     arguments: serde_json::Value,
-    _timeout: Option<u64>,
+    timeout: Option<u64>,
 ) -> Result<String, ToolshedError> {
-    let mut session = McpStdioSession::spawn(tool)?;
+    call_tool_with_state(tool, tool_name, arguments, timeout, None).await
+}
+
+/// Call a tool, resolving env vars from daemon state when available.
+pub async fn call_tool_with_state(
+    tool: &Tool,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    _timeout: Option<u64>,
+    daemon_state: Option<&DaemonState>,
+) -> Result<String, ToolshedError> {
+    let mut session = McpStdioSession::spawn(tool, daemon_state)?;
     session.initialize().await?;
 
     let params = ToolsCallParams {
