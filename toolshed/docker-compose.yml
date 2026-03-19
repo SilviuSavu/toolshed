@@ -26,8 +26,6 @@ services:
       - toolshed-cache:/root/.toolshed/cache
       - ../tools/vault/tool.json:/root/.toolshed/tools/vault/tool.json:ro
       - ./vault-env.sh:/vault-env.sh:ro
-      # TODO(M15): cross-sandbox access risk — toolshed can read/write ALL sandbox workspaces
-      - /tmp/orchestrator-workspaces:/workspaces:rw
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
