@@ -19,7 +19,6 @@ mod workflow;
 
 use std::process;
 
-use clap::Parser;
 use cli::{Cli, Command};
 use error::ToolshedError;
 
