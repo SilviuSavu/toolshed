@@ -59,6 +59,14 @@ impl Registry {
 
             match ToolManifest::load_and_validate(&manifest_path, &dir_name) {
                 Ok(manifest) => {
+                    if manifest.health.is_none() {
+                        registry.errors.push((
+                            dir_name.clone(),
+                            "tool manifest missing required health field".to_string(),
+                        ));
+                        continue;
+                    }
+
                     let run_path = path.join("run");
                     let has_run = run_path.exists();
 
