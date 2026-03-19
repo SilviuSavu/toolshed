@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Parsed parameter info for display.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ParamInfo {
     pub name: String,
     pub param_type: String,
@@ -17,12 +17,64 @@ pub struct ParamInfo {
     pub description: Option<String>,
 }
 
+impl serde::Serialize for ParamInfo {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let count = 3 + usize::from(self.description.is_some());
+        let mut map = serializer.serialize_map(Some(count))?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("param_type", &self.param_type)?;
+        map.serialize_entry("required", &self.required)?;
+        if let Some(ref d) = self.description { map.serialize_entry("description", d)?; }
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ParamInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
+        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        Ok(Self {
+            name: obj.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            param_type: obj.get("param_type").and_then(serde_json::Value::as_str).unwrap_or("any").to_string(),
+            required: obj.get("required").and_then(serde_json::Value::as_bool).unwrap_or_default(),
+            description: obj.get("description").and_then(serde_json::Value::as_str).map(String::from),
+        })
+    }
+}
+
 /// Friendly tool info for help display.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct McpToolInfo {
     pub name: String,
     pub description: Option<String>,
     pub params: Vec<ParamInfo>,
+}
+
+impl serde::Serialize for McpToolInfo {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let count = 2 + usize::from(self.description.is_some());
+        let mut map = serializer.serialize_map(Some(count))?;
+        map.serialize_entry("name", &self.name)?;
+        if let Some(ref d) = self.description { map.serialize_entry("description", d)?; }
+        map.serialize_entry("params", &self.params)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for McpToolInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
+        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        Ok(Self {
+            name: obj.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            description: obj.get("description").and_then(serde_json::Value::as_str).map(String::from),
+            params: obj.get("params").map_or_else(|| Ok(Vec::new()), |v| {
+                Vec::<ParamInfo>::deserialize(v).map_err(serde::de::Error::custom)
+            })?,
+        })
+    }
 }
 
 impl McpToolInfo {
