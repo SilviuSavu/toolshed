@@ -8,7 +8,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -25,30 +24,63 @@ use crate::{
 
 // ── Incoming JSON-RPC ──
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct IncomingJsonRpc {
-    #[serde(rename = "jsonrpc")]
     _jsonrpc: String,
     id: Option<serde_json::Value>,
     method: String,
     params: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+impl<'de> serde::Deserialize<'de> for IncomingJsonRpc {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
+        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        Ok(Self {
+            _jsonrpc: obj.get("jsonrpc").and_then(serde_json::Value::as_str).unwrap_or("2.0").to_string(),
+            id: obj.get("id").cloned(),
+            method: obj.get("method").and_then(serde_json::Value::as_str)
+                .ok_or_else(|| serde::de::Error::missing_field("method"))?.to_string(),
+            params: obj.get("params").cloned(),
+        })
+    }
+}
+
+#[derive(Debug)]
 struct OutgoingJsonRpc {
     jsonrpc: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<JsonRpcErrorBody>,
 }
 
-#[derive(Debug, Serialize)]
+impl serde::Serialize for OutgoingJsonRpc {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let count = 1 + usize::from(self.id.is_some()) + usize::from(self.result.is_some()) + usize::from(self.error.is_some());
+        let mut map = serializer.serialize_map(Some(count))?;
+        map.serialize_entry("jsonrpc", &self.jsonrpc)?;
+        if let Some(ref id) = self.id { map.serialize_entry("id", id)?; }
+        if let Some(ref result) = self.result { map.serialize_entry("result", result)?; }
+        if let Some(ref error) = self.error { map.serialize_entry("error", error)?; }
+        map.end()
+    }
+}
+
+#[derive(Debug)]
 struct JsonRpcErrorBody {
     code: i64,
     message: String,
+}
+
+impl serde::Serialize for JsonRpcErrorBody {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("code", &self.code)?;
+        map.serialize_entry("message", &self.message)?;
+        map.end()
+    }
 }
 
 impl OutgoingJsonRpc {
@@ -319,10 +351,19 @@ async fn handle_sse(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 // ── Messages endpoint: POST /messages ──
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct MessageQuery {
-    #[serde(rename = "sessionId")]
     session_id: String,
+}
+
+impl<'de> serde::Deserialize<'de> for MessageQuery {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = std::collections::HashMap::<String, String>::deserialize(deserializer)?;
+        let session_id = map.get("sessionId")
+            .ok_or_else(|| serde::de::Error::missing_field("sessionId"))?
+            .clone();
+        Ok(Self { session_id })
+    }
 }
 
 async fn handle_messages(
