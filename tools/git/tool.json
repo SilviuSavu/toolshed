@@ -1,9 +1,10 @@
 {
   "name": "git",
-  "description": "Git repository operations — status, diff, log, show, blame, branches, tags",
+  "description": "Git remote operations — clone, push, fetch, pull",
   "category": "version-control",
   "type": "mcp",
   "max_output": 32768,
+  "health": "npx -y @modelcontextprotocol/server-git --help >/dev/null 2>&1",
   "mcp": {
     "transport": "stdio",
     "command": "npx",
