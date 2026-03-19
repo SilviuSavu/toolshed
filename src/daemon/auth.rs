@@ -165,7 +165,11 @@ pub async fn vault_approle_login(
         .to_string();
 
     let lease_duration = auth.get("lease_duration").and_then(serde_json::Value::as_u64).unwrap_or(0);
-    let ttl = Duration::from_secs(lease_duration);
+    let ttl = if lease_duration == 0 {
+        Duration::from_secs(AUTH_DEFAULT_TTL_SECS)
+    } else {
+        Duration::from_secs(lease_duration)
+    };
     Ok((client_token, ttl))
 }
 

@@ -81,17 +81,22 @@ impl<'de> serde::Deserialize<'de> for AuditEntry {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
         let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let str_field = |key: &'static str| -> Result<String, D::Error> {
+            obj.get(key).and_then(serde_json::Value::as_str).map(String::from)
+                .ok_or_else(|| serde::de::Error::missing_field(key))
+        };
         Ok(Self {
-            seq: obj.get("seq").and_then(serde_json::Value::as_u64).unwrap_or(0),
-            ts: obj.get("ts").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-            session_id: obj.get("sessionId").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-            category: obj.get("category").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-            event: obj.get("event").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-            actor: obj.get("actor").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-            data: obj.get("data").cloned().unwrap_or(serde_json::Value::Null),
+            seq: obj.get("seq").and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| serde::de::Error::missing_field("seq"))?,
+            ts: str_field("ts")?,
+            session_id: str_field("sessionId")?,
+            category: str_field("category")?,
+            event: str_field("event")?,
+            actor: str_field("actor")?,
+            data: obj.get("data").cloned().ok_or_else(|| serde::de::Error::missing_field("data"))?,
             outcome: obj.get("outcome").and_then(serde_json::Value::as_str).map(String::from),
-            prev_hash: obj.get("prevHash").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-            hash: obj.get("hash").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            prev_hash: str_field("prevHash")?,
+            hash: str_field("hash")?,
         })
     }
 }
