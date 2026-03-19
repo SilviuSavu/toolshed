@@ -13,6 +13,8 @@ pub const AUTH_REFRESH_RATIO: f64 = 0.8;
 pub const AUTH_DEFAULT_TTL_SECS: u64 = 3600;
 pub const AUTH_RETRY_ATTEMPTS: u8 = 3;
 pub const GRACE_PERIOD_CYCLES: u64 = 1;
+/// Cold-tier tools are probed every Nth cycle (30s x 10 = 5 min).
+pub const COLD_TIER_CYCLE_MULTIPLIER: u64 = 10;
 
 pub fn toolshed_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("TOOLSHED_DIR") {
