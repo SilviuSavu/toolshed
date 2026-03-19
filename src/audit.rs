@@ -12,7 +12,6 @@ use std::{
 
 use chrono::Utc;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config;
@@ -45,8 +44,7 @@ static SENSITIVE_COMPACT_PATTERNS: &[&str] = &[
 
 // --- Types ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct AuditEntry {
     pub seq: u64,
     pub ts: String,
@@ -55,10 +53,47 @@ pub struct AuditEntry {
     pub event: String,
     pub actor: String,
     pub data: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub outcome: Option<String>,
     pub prev_hash: String,
     pub hash: String,
+}
+
+impl serde::Serialize for AuditEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let count = 8 + usize::from(self.outcome.is_some());
+        let mut map = serializer.serialize_map(Some(count))?;
+        map.serialize_entry("seq", &self.seq)?;
+        map.serialize_entry("ts", &self.ts)?;
+        map.serialize_entry("sessionId", &self.session_id)?;
+        map.serialize_entry("category", &self.category)?;
+        map.serialize_entry("event", &self.event)?;
+        map.serialize_entry("actor", &self.actor)?;
+        map.serialize_entry("data", &self.data)?;
+        if let Some(ref o) = self.outcome { map.serialize_entry("outcome", o)?; }
+        map.serialize_entry("prevHash", &self.prev_hash)?;
+        map.serialize_entry("hash", &self.hash)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AuditEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
+        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        Ok(Self {
+            seq: obj.get("seq").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            ts: obj.get("ts").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            session_id: obj.get("sessionId").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            category: obj.get("category").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            event: obj.get("event").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            actor: obj.get("actor").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            data: obj.get("data").cloned().unwrap_or(serde_json::Value::Null),
+            outcome: obj.get("outcome").and_then(serde_json::Value::as_str).map(String::from),
+            prev_hash: obj.get("prevHash").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            hash: obj.get("hash").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+        })
+    }
 }
 
 pub struct IntegrityResult {
