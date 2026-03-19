@@ -851,6 +851,31 @@ mod tests {
     }
 
     #[test]
+    fn test_down_tool_error_message() {
+        let resp = OutgoingJsonRpc::error(
+            Some(serde_json::json!(1)),
+            -32003,
+            "Tool 'sourcegraph' is down: connection refused".to_string(),
+        );
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("-32003"));
+        assert!(json.contains("sourcegraph"));
+        assert!(json.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_recovering_tool_error_message() {
+        let resp = OutgoingJsonRpc::error(
+            Some(serde_json::json!(1)),
+            -32003,
+            "Tool 'vault' is temporarily unavailable (recovering, attempt 2)".to_string(),
+        );
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("recovering"));
+        assert!(json.contains("attempt 2"));
+    }
+
+    #[test]
     fn test_health_response_serialization() {
         let resp = serde_json::json!({
             "status": "healthy",
