@@ -5,6 +5,7 @@
   "type": "native",
   "max_output": 50000,
   "health": "code-owners health",
+  "tier": "cold",
   "commands": {
     "sync": {
       "description": "Fetch and parse CODEOWNERS files from all indexed repos (or a specific repo)",

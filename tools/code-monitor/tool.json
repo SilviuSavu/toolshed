@@ -5,6 +5,7 @@
   "type": "native",
   "max_output": 10000,
   "health": "code-monitor health",
+  "tier": "cold",
   "commands": {
     "create": {
       "description": "Create a new code monitor (maps to createCodeMonitor)",

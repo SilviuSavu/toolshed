@@ -5,6 +5,7 @@
   "type": "native",
   "max_output": 32768,
   "health": "code-search health",
+  "tier": "cold",
   "commands": {
     "query": {
       "description": "Search code across all indexed repositories. Returns matching file paths and code snippets.",

@@ -5,6 +5,7 @@
   "type": "mcp",
   "max_output": 32768,
   "health": "npx -y @modelcontextprotocol/server-git --help >/dev/null 2>&1",
+  "tier": "cold",
   "mcp": {
     "transport": "stdio",
     "command": "npx",

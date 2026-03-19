@@ -5,6 +5,7 @@
   "type": "native",
   "max_output": 65536,
   "health": "sourcegraph health",
+  "tier": "hot",
   "commands": {
     "keyword_search": {
       "description": "Search code across all indexed repositories using Sourcegraph's keyword search. Supports standard Sourcegraph query syntax including repo:, file:, lang: filters.",

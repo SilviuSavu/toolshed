@@ -8,5 +8,6 @@
     "transport": "stdio",
     "command": "/Users/savusilviu/.toolshed/tools/narsil/run"
   },
-  "health": "which narsil-mcp"
+  "health": "which narsil-mcp",
+  "tier": "cold"
 }

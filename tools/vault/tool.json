@@ -14,5 +14,6 @@
       "VAULT_ALLOW_WRITE": "true"
     }
   },
-  "health": "curl -sf ${VAULT_ADDR}/v1/sys/health"
+  "health": "curl -sf ${VAULT_ADDR}/v1/sys/health",
+  "tier": "hot"
 }

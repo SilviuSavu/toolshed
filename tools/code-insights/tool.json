@@ -5,6 +5,7 @@
   "type": "native",
   "max_output": 25000,
   "health": "code-insights health",
+  "tier": "cold",
   "commands": {
     "create_insight": {
       "description": "Create a new insight (tracked metric) — aligns with createLineChartSearchInsight",

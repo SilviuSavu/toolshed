@@ -5,6 +5,7 @@
   "type": "native",
   "max_output": 50000,
   "health": "batch-changes health",
+  "tier": "cold",
   "commands": {
     "new": {
       "description": "Create a new batch change spec (saved locally, not yet executed)",

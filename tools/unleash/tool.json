@@ -12,5 +12,6 @@
       "UNLEASH_API_TOKEN": "${UNLEASH_API_TOKEN}"
     }
   },
-  "health": "curl -sf http://unleash:4242/health"
+  "health": "curl -sf http://unleash:4242/health",
+  "tier": "hot"
 }

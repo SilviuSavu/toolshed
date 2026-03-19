@@ -15,5 +15,6 @@
       "HULY_WORKSPACE": "${HULY_WORKSPACE}"
     }
   },
-  "health": "npx -y @firfi/huly-mcp@latest --help >/dev/null 2>&1"
+  "health": "npx -y @firfi/huly-mcp@latest --help >/dev/null 2>&1",
+  "tier": "hot"
 }
