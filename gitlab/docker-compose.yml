@@ -26,13 +26,18 @@ services:
       - gitlab-logs:/var/log/gitlab
       - gitlab-data:/var/opt/gitlab
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/-/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
 
   gitlab-runner:
     image: gitlab/gitlab-runner:latest
     depends_on:
-      - gitlab
-    environment:
-      - RUNNER_AUTH_TOKEN=${RUNNER_AUTH_TOKEN}
+      gitlab:
+        condition: service_healthy
     volumes:
       - gitlab-runner-config:/etc/gitlab-runner
       - /var/run/docker.sock:/var/run/docker.sock:ro
