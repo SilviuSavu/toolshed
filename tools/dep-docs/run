@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RC_URL="${RC_URL:-http://host.docker.internal:7333}"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+cmd_search() {
+    local library="${1:-}"
+    [[ -n "$library" ]] || die "usage: dep-docs search <library>"
+
+    local response
+    response=$(curl -sf --max-time 30 \
+        "${RC_URL}/api/v2/libs/search?libraryName=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$library'))")") \
+        || die "rc-server not reachable at $RC_URL"
+
+    echo "$response" | jq -r '
+        if .error then "ERROR: \(.error)"
+        elif .libraries then
+            (.libraries | length | tostring) + " libraries found:\n" +
+            ([.libraries[] |
+                "  \(.name // .id) — \(.description // "no description")" +
+                (if .snippets then " (\(.snippets) snippets indexed)" else "" end)
+            ] | join("\n"))
+        else "No results"
+        end
+    ' 2>/dev/null || echo "$response"
+}
+
+cmd_get_doc() {
+    local library_id="${1:-}"
+    [[ -n "$library_id" ]] || die "usage: dep-docs get_doc <library_id> --query <query> [--limit N]"
+
+    local query="" limit="5"
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --query) query="$2"; shift 2 ;;
+            --limit) limit="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    [[ -n "$query" ]] || die "usage: dep-docs get_doc <library_id> --query <query>"
+
+    local encoded_id encoded_query
+    encoded_id=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$library_id'))")
+    encoded_query=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$query'))")
+
+    local response
+    response=$(curl -sf --max-time 120 \
+        "${RC_URL}/api/v2/context?libraryId=${encoded_id}&query=${encoded_query}&limit=${limit}") \
+        || die "rc-server not reachable at $RC_URL (query may have timed out — first queries trigger indexing)"
+
+    echo "$response" | jq -r '
+        if .error then "ERROR: \(.error)"
+        elif .results then
+            ([.results[] |
+                "--- \(.symbol_path // .symbolPath // "unknown") [\(.doc_type // .docType // "doc")] ---\n" +
+                (.content // "no content") + "\n"
+            ] | join("\n"))
+        else . | tostring
+        end
+    ' 2>/dev/null || echo "$response"
+}
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    search)  cmd_search "$@" ;;
+    get_doc) cmd_get_doc "$@" ;;
+    *)       die "unknown command: $COMMAND (available: search, get_doc)" ;;
+esac

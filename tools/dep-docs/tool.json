@@ -1,0 +1,45 @@
+{
+  "name": "dep-docs",
+  "description": "Dependency documentation search — find and query API docs for Rust crates and Python libraries with hybrid search (semantic + BM25 + reranking). Auto-indexes on first query.",
+  "category": "code-intelligence",
+  "type": "native",
+  "max_output": 65536,
+  "health": "curl -sf http://host.docker.internal:7333/health",
+  "tier": "hot",
+  "commands": {
+    "search": {
+      "description": "Search for a library by name. Returns matching crates and Python packages with snippet counts.",
+      "args": {
+        "library": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Library name to search for (e.g. 'serde', 'tokio', 'polars')"
+        }
+      }
+    },
+    "get_doc": {
+      "description": "Query documentation for a specific library. Returns relevant API docs, code examples, and type signatures via hybrid search with reranking. Auto-indexes the library on first query.",
+      "args": {
+        "library_id": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Library identifier from search results (e.g. 'serde', 'tokio::runtime')"
+        },
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": false,
+          "description": "What to look up — be specific (e.g. 'derive macro for serialization', 'spawn async task', 'DataFrame filter rows')"
+        },
+        "limit": {
+          "type": "int",
+          "required": false,
+          "positional": false,
+          "description": "Maximum number of results (default: 5)"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "gitlab",
+  "description": "GitLab API — projects, merge requests, pipelines, issues, CI/CD management",
+  "category": "version-control",
+  "type": "mcp",
+  "max_output": 32768,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@alosies/gitlab-mcp-server"],
+    "env": {
+      "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_TOKEN}",
+      "GITLAB_API_URL": "${GITLAB_BASE_URL}/api/v4"
+    }
+  },
+  "health": "npx -y @alosies/gitlab-mcp-server --help >/dev/null 2>&1",
+  "tier": "hot"
+}
