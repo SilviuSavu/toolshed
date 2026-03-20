@@ -1900,6 +1900,7 @@
     },
     "deepsearch": {
       "description": "Multi-step LLM-driven deep code research. Spawns an AI research loop that searches, reads files, traces code paths, and synthesizes a thorough answer. Use for complex questions that require combining information from multiple sources across repositories.",
+      "timeout": 600,
       "args": {
         "question": {
           "type": "string",
@@ -1917,7 +1918,13 @@
           "type": "string",
           "required": false,
           "positional": false,
-          "description": "Override model name (e.g. glm-4.7, qwen/qwen3-235b-a22b)"
+          "description": "Override model name: glm-5 (default) or glm-5-turbo"
+        },
+        "duration": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Maximum research duration in seconds (default: 300)"
         }
       }
     },

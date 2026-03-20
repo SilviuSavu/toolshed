@@ -1,0 +1,15 @@
+{
+  "name": "scrapling",
+  "description": "Web scraping — extract structured data from websites, handle dynamic content",
+  "category": "networking",
+  "type": "mcp",
+  "max_output": 65536,
+  "mcp": {
+    "transport": "stdio",
+    "command": "scrapling",
+    "args": ["mcp"],
+    "env": {}
+  },
+  "health": "python3 -c 'import scrapling'",
+  "tier": "cold"
+}

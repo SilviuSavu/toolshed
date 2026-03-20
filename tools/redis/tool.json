@@ -1,0 +1,17 @@
+{
+  "name": "redis",
+  "description": "Redis database — get, set, delete keys, inspect data structures, manage connections",
+  "category": "database",
+  "type": "mcp",
+  "max_output": 32768,
+  "mcp": {
+    "transport": "stdio",
+    "command": "redis-mcp-server",
+    "args": [],
+    "env": {
+      "REDIS_URL": "${REDIS_URL:-redis://host.docker.internal:6379}"
+    }
+  },
+  "health": "which redis-mcp-server",
+  "tier": "cold"
+}

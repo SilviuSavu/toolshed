@@ -1,0 +1,15 @@
+{
+  "name": "filesystem",
+  "description": "Local filesystem operations — read, write, list, search, move files and directories",
+  "category": "file-system",
+  "type": "mcp",
+  "max_output": 65536,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+    "env": {}
+  },
+  "health": "npx -y @modelcontextprotocol/server-filesystem --help >/dev/null 2>&1",
+  "tier": "hot"
+}

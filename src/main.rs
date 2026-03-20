@@ -93,8 +93,8 @@ async fn cmd_list(category: Option<String>, show_health: bool) -> Result<(), Too
             let mut unconfigured = 0usize;
             for name in names {
                 match health_results.get(name.as_str()) {
-                    Some(Some(true)) => up += 1,
-                    Some(Some(false)) => down += 1,
+                    Some(Some(Ok(()))) => up += 1,
+                    Some(Some(Err(_))) => down += 1,
                     _ => unconfigured += 1,
                 }
             }
@@ -157,8 +157,8 @@ async fn print_native_help(
     if m.health.is_some() {
         let status = health::check_one(tool).await;
         match status {
-            Some(true) => println!("Status: up"),
-            Some(false) => println!("Status: DOWN"),
+            Some(Ok(())) => println!("Status: up"),
+            Some(Err(detail)) => println!("Status: DOWN ({detail})"),
             None => {}
         }
     }

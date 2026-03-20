@@ -1,0 +1,17 @@
+{
+  "name": "postgres",
+  "description": "PostgreSQL database — execute queries, inspect schemas, manage tables and indexes",
+  "category": "database",
+  "type": "mcp",
+  "max_output": 65536,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@henkey/postgres-mcp-server"],
+    "env": {
+      "DATABASE_URI": "${DATABASE_URI}"
+    }
+  },
+  "health": "npx -y @henkey/postgres-mcp-server --help >/dev/null 2>&1",
+  "tier": "cold"
+}

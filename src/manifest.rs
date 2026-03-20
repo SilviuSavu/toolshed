@@ -55,7 +55,10 @@ impl<'de> serde::Deserialize<'de> for ArgType {
             "int" => Ok(Self::Int),
             "float" => Ok(Self::Float),
             "bool" => Ok(Self::Bool),
-            other => Err(serde::de::Error::unknown_variant(other, &["string", "int", "float", "bool"])),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["string", "int", "float", "bool"],
+            )),
         }
     }
 }
@@ -98,15 +101,28 @@ pub struct ArgDef {
 impl<'de> serde::Deserialize<'de> for ArgDef {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
-        let type_val = obj.get("type").ok_or_else(|| serde::de::Error::missing_field("type"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let type_val = obj
+            .get("type")
+            .ok_or_else(|| serde::de::Error::missing_field("type"))?;
         let arg_type = ArgType::deserialize(type_val.clone()).map_err(serde::de::Error::custom)?;
         Ok(Self {
             arg_type,
-            required: obj.get("required").and_then(serde_json::Value::as_bool).unwrap_or_default(),
-            positional: obj.get("positional").and_then(serde_json::Value::as_bool).unwrap_or_default(),
+            required: obj
+                .get("required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_default(),
+            positional: obj
+                .get("positional")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_default(),
             default: obj.get("default").cloned(),
-            description: obj.get("description").and_then(serde_json::Value::as_str).map(String::from),
+            description: obj
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from),
         })
     }
 }
@@ -120,12 +136,20 @@ pub struct CommandDef {
 impl<'de> serde::Deserialize<'de> for CommandDef {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
-        let description = obj.get("description").and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("description"))?.to_string();
-        let args = obj.get("args").map_or_else(|| Ok(BTreeMap::new()), |v| {
-            BTreeMap::<String, ArgDef>::deserialize(v.clone()).map_err(serde::de::Error::custom)
-        })?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let description = obj
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::missing_field("description"))?
+            .to_string();
+        let args = obj.get("args").map_or_else(
+            || Ok(BTreeMap::new()),
+            |v| {
+                BTreeMap::<String, ArgDef>::deserialize(v.clone()).map_err(serde::de::Error::custom)
+            },
+        )?;
         Ok(Self { description, args })
     }
 }
@@ -143,21 +167,45 @@ pub struct McpConfig {
 impl<'de> serde::Deserialize<'de> for McpConfig {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
-        let tv = obj.get("transport").ok_or_else(|| serde::de::Error::missing_field("transport"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let tv = obj
+            .get("transport")
+            .ok_or_else(|| serde::de::Error::missing_field("transport"))?;
         let transport = McpTransport::deserialize(tv.clone()).map_err(serde::de::Error::custom)?;
-        let command = obj.get("command").and_then(serde_json::Value::as_str).map(String::from);
-        let args = obj.get("args").map_or_else(|| Ok(Vec::new()), |v| {
-            Vec::<String>::deserialize(v.clone()).map_err(serde::de::Error::custom)
-        })?;
-        let url = obj.get("url").and_then(serde_json::Value::as_str).map(String::from);
-        let env = obj.get("env").map_or_else(|| Ok(BTreeMap::new()), |v| {
-            BTreeMap::<String, String>::deserialize(v.clone()).map_err(serde::de::Error::custom)
-        })?;
-        let headers = obj.get("headers").map_or_else(|| Ok(BTreeMap::new()), |v| {
-            BTreeMap::<String, String>::deserialize(v.clone()).map_err(serde::de::Error::custom)
-        })?;
-        Ok(Self { transport, command, args, url, env, headers })
+        let command = obj
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
+        let args = obj.get("args").map_or_else(
+            || Ok(Vec::new()),
+            |v| Vec::<String>::deserialize(v.clone()).map_err(serde::de::Error::custom),
+        )?;
+        let url = obj
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
+        let env = obj.get("env").map_or_else(
+            || Ok(BTreeMap::new()),
+            |v| {
+                BTreeMap::<String, String>::deserialize(v.clone()).map_err(serde::de::Error::custom)
+            },
+        )?;
+        let headers = obj.get("headers").map_or_else(
+            || Ok(BTreeMap::new()),
+            |v| {
+                BTreeMap::<String, String>::deserialize(v.clone()).map_err(serde::de::Error::custom)
+            },
+        )?;
+        Ok(Self {
+            transport,
+            command,
+            args,
+            url,
+            env,
+            headers,
+        })
     }
 }
 
@@ -194,27 +242,65 @@ pub struct ToolManifest {
 impl<'de> serde::Deserialize<'de> for ToolManifest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
-        let name = obj.get("name").and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("name"))?.to_string();
-        let description = obj.get("description").and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("description"))?.to_string();
-        let category = obj.get("category").and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("category"))?.to_string();
-        let tv = obj.get("type").ok_or_else(|| serde::de::Error::missing_field("type"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let name = obj
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::missing_field("name"))?
+            .to_string();
+        let description = obj
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::missing_field("description"))?
+            .to_string();
+        let category = obj
+            .get("category")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::missing_field("category"))?
+            .to_string();
+        let tv = obj
+            .get("type")
+            .ok_or_else(|| serde::de::Error::missing_field("type"))?;
         let tool_type = ToolType::deserialize(tv.clone()).map_err(serde::de::Error::custom)?;
-        let max_output = obj.get("max_output").and_then(serde_json::Value::as_u64)
+        let max_output = obj
+            .get("max_output")
+            .and_then(serde_json::Value::as_u64)
             .and_then(|v| usize::try_from(v).ok())
             .unwrap_or(DEFAULT_MAX_OUTPUT);
-        let health = obj.get("health").and_then(serde_json::Value::as_str).map(String::from);
-        let tier = obj.get("tier").map(|v| HealthTier::deserialize(v.clone()))
-            .transpose().map_err(serde::de::Error::custom)?;
-        let commands = obj.get("commands").map_or_else(|| Ok(BTreeMap::new()), |v| {
-            BTreeMap::<String, CommandDef>::deserialize(v.clone()).map_err(serde::de::Error::custom)
-        })?;
-        let mcp = obj.get("mcp").map(|v| McpConfig::deserialize(v.clone()))
-            .transpose().map_err(serde::de::Error::custom)?;
-        Ok(Self { name, description, category, tool_type, max_output, health, tier, commands, mcp })
+        let health = obj
+            .get("health")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
+        let tier = obj
+            .get("tier")
+            .map(|v| HealthTier::deserialize(v.clone()))
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let commands = obj.get("commands").map_or_else(
+            || Ok(BTreeMap::new()),
+            |v| {
+                BTreeMap::<String, CommandDef>::deserialize(v.clone())
+                    .map_err(serde::de::Error::custom)
+            },
+        )?;
+        let mcp = obj
+            .get("mcp")
+            .map(|v| McpConfig::deserialize(v.clone()))
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            name,
+            description,
+            category,
+            tool_type,
+            max_output,
+            health,
+            tier,
+            commands,
+            mcp,
+        })
     }
 }
 

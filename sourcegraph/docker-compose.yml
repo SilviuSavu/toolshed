@@ -14,6 +14,12 @@ services:
         limits:
           memory: 4G
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:7080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 networks:
   default:
@@ -22,4 +28,8 @@ networks:
 
 volumes:
   sg-config:
+    external: true
+    name: sourcegraph_sg-config
   sg-data:
+    external: true
+    name: sourcegraph_sg-data

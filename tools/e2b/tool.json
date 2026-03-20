@@ -1,0 +1,17 @@
+{
+  "name": "e2b",
+  "description": "E2B cloud sandboxes — create, execute code, manage sandbox environments",
+  "category": "sandbox",
+  "type": "mcp",
+  "max_output": 32768,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@e2b/mcp-server"],
+    "env": {
+      "E2B_API_KEY": "${E2B_API_KEY}"
+    }
+  },
+  "health": "npx -y @e2b/mcp-server --help >/dev/null 2>&1",
+  "tier": "cold"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "memory",
+  "description": "Persistent knowledge graph — store, query, and connect entities and relations",
+  "category": "knowledge",
+  "type": "mcp",
+  "max_output": 16384,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-memory"],
+    "env": {}
+  },
+  "health": "npx -y @modelcontextprotocol/server-memory --help >/dev/null 2>&1",
+  "tier": "cold"
+}

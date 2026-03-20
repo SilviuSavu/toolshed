@@ -1,0 +1,15 @@
+{
+  "name": "playwright",
+  "description": "Browser automation — navigate pages, click elements, fill forms, take screenshots",
+  "category": "browser-automation",
+  "type": "mcp",
+  "max_output": 65536,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp"],
+    "env": {}
+  },
+  "health": "npx -y @playwright/mcp --help >/dev/null 2>&1",
+  "tier": "cold"
+}

@@ -3,37 +3,123 @@ use std::io;
 
 #[derive(Debug)]
 pub enum ToolshedError {
-    NoToolshedDir { path: String },
-    ToolNotFound { name: String },
-    CategoryNotFound { name: String },
-    BadManifest { tool: String, reason: String },
-    MissingRunScript { tool: String },
-    MissingMcpConfig { tool: String },
-    CommandNotFound { tool: String, command: String },
-    MissingArg { tool: String, command: String, arg: String },
-    ToolFailed { tool: String, code: i32, stderr: String },
-    ToolTimeout { tool: String, timeout_secs: u64 },
-    McpSpawnFailed { tool: String, reason: String },
-    McpRpcError { tool: String, code: i64, message: String },
-    McpBadResponse { tool: String, reason: String },
-    McpCrashed { tool: String },
-    McpHttpError { tool: String, reason: String },
-    SkillNotFound { name: String },
-    AgentNotFound { name: String },
-    BadSkill { skill: String, reason: String },
-    BadAgent { agent: String, reason: String },
-    RuleNotFound { name: String },
-    BadRule { rule: String, reason: String },
-    WorkflowNotFound { name: String },
-    BadWorkflow { workflow: String, reason: String },
-    WorkflowStepFailed { workflow: String, step: usize, tool: String, command: String, reason: String },
-    WorkflowTimeout { workflow: String, timeout_secs: u64 },
-    AuditChainBroken { message: String },
-    EnvVarNotSet { var: String },
-    VaultError { reason: String },
-    VaultAuthFailed { reason: String },
-    RecoveryExhausted { tool: String, reason: String },
-    HealthProbeFailed { tool: String, reason: String },
+    NoToolshedDir {
+        path: String,
+    },
+    ToolNotFound {
+        name: String,
+    },
+    CategoryNotFound {
+        name: String,
+    },
+    BadManifest {
+        tool: String,
+        reason: String,
+    },
+    MissingRunScript {
+        tool: String,
+    },
+    MissingMcpConfig {
+        tool: String,
+    },
+    CommandNotFound {
+        tool: String,
+        command: String,
+    },
+    MissingArg {
+        tool: String,
+        command: String,
+        arg: String,
+    },
+    ToolFailed {
+        tool: String,
+        code: i32,
+        stderr: String,
+    },
+    ToolTimeout {
+        tool: String,
+        timeout_secs: u64,
+    },
+    McpSpawnFailed {
+        tool: String,
+        reason: String,
+    },
+    McpRpcError {
+        tool: String,
+        code: i64,
+        message: String,
+    },
+    McpBadResponse {
+        tool: String,
+        reason: String,
+    },
+    McpCrashed {
+        tool: String,
+        reason: String,
+    },
+    McpHttpError {
+        tool: String,
+        reason: String,
+    },
+    SkillNotFound {
+        name: String,
+    },
+    AgentNotFound {
+        name: String,
+    },
+    BadSkill {
+        skill: String,
+        reason: String,
+    },
+    BadAgent {
+        agent: String,
+        reason: String,
+    },
+    RuleNotFound {
+        name: String,
+    },
+    BadRule {
+        rule: String,
+        reason: String,
+    },
+    WorkflowNotFound {
+        name: String,
+    },
+    BadWorkflow {
+        workflow: String,
+        reason: String,
+    },
+    WorkflowStepFailed {
+        workflow: String,
+        step: usize,
+        tool: String,
+        command: String,
+        reason: String,
+    },
+    WorkflowTimeout {
+        workflow: String,
+        timeout_secs: u64,
+    },
+    AuditChainBroken {
+        message: String,
+    },
+    EnvVarNotSet {
+        var: String,
+    },
+    VaultError {
+        reason: String,
+    },
+    VaultAuthFailed {
+        reason: String,
+    },
+    RecoveryExhausted {
+        tool: String,
+        reason: String,
+    },
+    HealthProbeFailed {
+        tool: String,
+        reason: String,
+    },
     Io(io::Error),
     Json(serde_json::Error),
     Http(reqwest::Error),
@@ -45,18 +131,40 @@ impl fmt::Display for ToolshedError {
             Self::NoToolshedDir { path } => write!(f, "no toolshed directory at {path}"),
             Self::ToolNotFound { name } => write!(f, "tool not found: {name}"),
             Self::CategoryNotFound { name } => write!(f, "category not found: {name}"),
-            Self::BadManifest { tool, reason } => write!(f, "bad manifest for tool '{tool}': {reason}"),
+            Self::BadManifest { tool, reason } => {
+                write!(f, "bad manifest for tool '{tool}': {reason}")
+            }
             Self::MissingRunScript { tool } => write!(f, "missing 'run' script for tool '{tool}'"),
             Self::MissingMcpConfig { tool } => write!(f, "missing mcp config for tool '{tool}'"),
-            Self::CommandNotFound { tool, command } => write!(f, "command not found: {tool}/{command}"),
-            Self::MissingArg { tool, command, arg } => write!(f, "missing required argument '{arg}' for {tool}/{command}"),
-            Self::ToolFailed { tool, code, stderr } => write!(f, "tool '{tool}' failed with exit code {code}: {stderr}"),
-            Self::ToolTimeout { tool, timeout_secs } => write!(f, "tool '{tool}' timed out after {timeout_secs}s"),
-            Self::McpSpawnFailed { tool, reason } => write!(f, "failed to spawn MCP server for '{tool}': {reason}"),
-            Self::McpRpcError { tool, code, message } => write!(f, "MCP RPC error for '{tool}': [{code}] {message}"),
-            Self::McpBadResponse { tool, reason } => write!(f, "MCP bad response for '{tool}': {reason}"),
-            Self::McpCrashed { tool } => write!(f, "MCP server crashed for '{tool}'"),
-            Self::McpHttpError { tool, reason } => write!(f, "MCP HTTP error for '{tool}': {reason}"),
+            Self::CommandNotFound { tool, command } => {
+                write!(f, "command not found: {tool}/{command}")
+            }
+            Self::MissingArg { tool, command, arg } => {
+                write!(f, "missing required argument '{arg}' for {tool}/{command}")
+            }
+            Self::ToolFailed { tool, code, stderr } => {
+                write!(f, "tool '{tool}' failed with exit code {code}: {stderr}")
+            }
+            Self::ToolTimeout { tool, timeout_secs } => {
+                write!(f, "tool '{tool}' timed out after {timeout_secs}s")
+            }
+            Self::McpSpawnFailed { tool, reason } => {
+                write!(f, "failed to spawn MCP server for '{tool}': {reason}")
+            }
+            Self::McpRpcError {
+                tool,
+                code,
+                message,
+            } => write!(f, "MCP RPC error for '{tool}': [{code}] {message}"),
+            Self::McpBadResponse { tool, reason } => {
+                write!(f, "MCP bad response for '{tool}': {reason}")
+            }
+            Self::McpCrashed { tool, reason } => {
+                write!(f, "MCP server crashed for '{tool}': {reason}")
+            }
+            Self::McpHttpError { tool, reason } => {
+                write!(f, "MCP HTTP error for '{tool}': {reason}")
+            }
             Self::SkillNotFound { name } => write!(f, "skill not found: {name}"),
             Self::AgentNotFound { name } => write!(f, "agent not found: {name}"),
             Self::BadSkill { skill, reason } => write!(f, "bad skill '{skill}': {reason}"),
@@ -64,17 +172,35 @@ impl fmt::Display for ToolshedError {
             Self::RuleNotFound { name } => write!(f, "rule not found: {name}"),
             Self::BadRule { rule, reason } => write!(f, "bad rule '{rule}': {reason}"),
             Self::WorkflowNotFound { name } => write!(f, "workflow not found: {name}"),
-            Self::BadWorkflow { workflow, reason } => write!(f, "bad workflow '{workflow}': {reason}"),
-            Self::WorkflowStepFailed { workflow, step, tool, command, reason } => {
-                write!(f, "workflow '{workflow}' step {step} ({tool} {command}) failed: {reason}")
+            Self::BadWorkflow { workflow, reason } => {
+                write!(f, "bad workflow '{workflow}': {reason}")
             }
-            Self::WorkflowTimeout { workflow, timeout_secs } => write!(f, "workflow '{workflow}' timed out after {timeout_secs}s"),
+            Self::WorkflowStepFailed {
+                workflow,
+                step,
+                tool,
+                command,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "workflow '{workflow}' step {step} ({tool} {command}) failed: {reason}"
+                )
+            }
+            Self::WorkflowTimeout {
+                workflow,
+                timeout_secs,
+            } => write!(f, "workflow '{workflow}' timed out after {timeout_secs}s"),
             Self::AuditChainBroken { message } => write!(f, "audit chain broken: {message}"),
             Self::EnvVarNotSet { var } => write!(f, "environment variable not set: {var}"),
             Self::VaultError { reason } => write!(f, "vault request failed: {reason}"),
             Self::VaultAuthFailed { reason } => write!(f, "vault auth failed: {reason}"),
-            Self::RecoveryExhausted { tool, reason } => write!(f, "tool recovery exhausted for '{tool}': {reason}"),
-            Self::HealthProbeFailed { tool, reason } => write!(f, "daemon health probe failed for '{tool}': {reason}"),
+            Self::RecoveryExhausted { tool, reason } => {
+                write!(f, "tool recovery exhausted for '{tool}': {reason}")
+            }
+            Self::HealthProbeFailed { tool, reason } => {
+                write!(f, "daemon health probe failed for '{tool}': {reason}")
+            }
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::Json(err) => write!(f, "JSON error: {err}"),
             Self::Http(err) => write!(f, "HTTP error: {err}"),
@@ -178,10 +304,7 @@ mod tests {
             tool: "foo".into(),
             reason: "missing name".into(),
         };
-        assert_eq!(
-            e.to_string(),
-            "bad manifest for tool 'foo': missing name"
-        );
+        assert_eq!(e.to_string(), "bad manifest for tool 'foo': missing name");
     }
 
     #[test]
@@ -249,8 +372,9 @@ mod tests {
     fn display_mcp_crashed() {
         let e = ToolshedError::McpCrashed {
             tool: "srv".into(),
+            reason: "EOF on stdout".into(),
         };
-        assert_eq!(e.to_string(), "MCP server crashed for 'srv'");
+        assert_eq!(e.to_string(), "MCP server crashed for 'srv': EOF on stdout");
     }
 
     #[test]

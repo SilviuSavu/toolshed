@@ -12,16 +12,28 @@ set -euo pipefail
 VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
 VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
 
-_vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph")
+_vault_data=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/sourcegraph") \
+    || die "cannot reach Vault at $VAULT_ADDR"
+_vault_errors=$(echo "$_vault_data" | jq -r '.errors[0] // empty' 2>/dev/null)
+[[ -n "$_vault_errors" ]] && die "Vault error: $_vault_errors"
 SG_URL=$(echo "$_vault_data" | jq -r '.data.data.url')
 SG_TOKEN=$(echo "$_vault_data" | jq -r '.data.data.token')
-unset _vault_data
+unset _vault_data _vault_errors
+[[ -z "$SG_URL" || "$SG_URL" == "null" ]] && die "Vault secret missing 'url' key at sourcegraph"
+[[ -z "$SG_TOKEN" || "$SG_TOKEN" == "null" ]] && die "Vault secret missing 'token' key at sourcegraph"
 
 graphql() {
-    curl -sf -H "Authorization: token $SG_TOKEN" \
+    local _resp
+    _resp=$(curl -s -H "Authorization: token $SG_TOKEN" \
         -H 'Content-Type: application/json' \
         -X POST "$SG_URL/.api/graphql" \
-        -d "$1"
+        -d "$1") || { echo "ERROR: GraphQL request failed (curl exit $?)" >&2; return 1; }
+    local _gql_err
+    _gql_err=$(echo "$_resp" | jq -r '.errors[0].message // empty' 2>/dev/null)
+    if [[ -n "$_gql_err" ]]; then
+        echo "ERROR: GraphQL: $_gql_err" >&2
+    fi
+    echo "$_resp"
 }
 
 # ---------------------------------------------------------------------------
@@ -501,11 +513,11 @@ cmd_health() {
         ok=false
     else
         local http_code
-        http_code=$(curl -sf -o /dev/null -w '%{http_code}' \
+        http_code=$(curl -o /dev/null -w '%{http_code}' -s \
             -H "Authorization: token $SG_TOKEN" \
             -H 'Content-Type: application/json' \
             -X POST "$SG_URL/.api/graphql" \
-            -d '{"query":"{ currentUser { username } }"}' 2>/dev/null || echo "000")
+            -d '{"query":"{ currentUser { username } }"}' 2>/dev/null) || http_code="000"
 
         if [[ "$http_code" == "200" ]]; then
             local username
@@ -519,8 +531,8 @@ cmd_health() {
 
     echo "Checking Vault connectivity ..."
     local vault_code
-    vault_code=$(curl -sf -o /dev/null -w '%{http_code}' \
-        "$VAULT_ADDR/v1/sys/health" 2>/dev/null || echo "000")
+    vault_code=$(curl -o /dev/null -w '%{http_code}' -s \
+        "$VAULT_ADDR/v1/sys/health" 2>/dev/null) || vault_code="000"
     if [[ "$vault_code" == "200" ]]; then
         echo "  Vault: OK ($VAULT_ADDR)"
     else

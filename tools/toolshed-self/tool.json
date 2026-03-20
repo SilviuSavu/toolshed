@@ -1,0 +1,59 @@
+{
+  "name": "toolshed-self",
+  "description": "Toolshed introspection — discover available tools, search by name or description, view schemas, and invoke tools dynamically",
+  "category": "meta",
+  "type": "native",
+  "max_output": 32768,
+  "health": "curl -sf http://localhost:8081 -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | jq -e '.result.tools | length > 0' >/dev/null",
+  "tier": "hot",
+  "commands": {
+    "prefixes": {
+      "description": "List all tool server prefixes (e.g. gitlab, narsil, code-search). Each prefix groups related tools.",
+      "args": {}
+    },
+    "list": {
+      "description": "List all tools, or filter by prefix. Shows tool name and description.",
+      "args": {
+        "prefix": {
+          "type": "string",
+          "required": false,
+          "positional": true,
+          "description": "Optional prefix to filter by (e.g. 'narsil', 'gitlab', 'code-search')"
+        }
+      }
+    },
+    "search": {
+      "description": "Search tools by keyword in name or description.",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Search query (e.g. 'vulnerability', 'git branch', 'code search')"
+        }
+      }
+    },
+    "schema": {
+      "description": "Show the full JSON schema for a specific tool, including all parameters.",
+      "args": {
+        "tool_name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Full tool name (e.g. 'narsil__call_graph', 'gitlab__create_merge_request')"
+        }
+      }
+    },
+    "call": {
+      "description": "Invoke a tool by name with named arguments.",
+      "args": {
+        "tool_name": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Full tool name to call"
+        }
+      }
+    }
+  }
+}

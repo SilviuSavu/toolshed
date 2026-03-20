@@ -29,7 +29,9 @@ impl serde::Serialize for JsonRpcRequest {
         map.serialize_entry("jsonrpc", &self.jsonrpc)?;
         map.serialize_entry("id", &self.id)?;
         map.serialize_entry("method", &self.method)?;
-        if let Some(ref p) = self.params { map.serialize_entry("params", p)?; }
+        if let Some(ref p) = self.params {
+            map.serialize_entry("params", p)?;
+        }
         map.end()
     }
 }
@@ -37,11 +39,24 @@ impl serde::Serialize for JsonRpcRequest {
 impl<'de> serde::Deserialize<'de> for JsonRpcRequest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
         Ok(Self {
-            jsonrpc: obj.get("jsonrpc").and_then(serde_json::Value::as_str).unwrap_or("2.0").to_string(),
-            id: obj.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0),
-            method: obj.get("method").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            jsonrpc: obj
+                .get("jsonrpc")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("2.0")
+                .to_string(),
+            id: obj
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            method: obj
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             params: obj.get("params").cloned(),
         })
     }
@@ -71,7 +86,9 @@ impl serde::Serialize for JsonRpcNotification {
         let mut map = serializer.serialize_map(Some(count))?;
         map.serialize_entry("jsonrpc", &self.jsonrpc)?;
         map.serialize_entry("method", &self.method)?;
-        if let Some(ref p) = self.params { map.serialize_entry("params", p)?; }
+        if let Some(ref p) = self.params {
+            map.serialize_entry("params", p)?;
+        }
         map.end()
     }
 }
@@ -87,12 +104,21 @@ pub struct JsonRpcResponse {
 impl serde::Serialize for JsonRpcResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let count = 1 + usize::from(self.id.is_some()) + usize::from(self.result.is_some()) + usize::from(self.error.is_some());
+        let count = 1
+            + usize::from(self.id.is_some())
+            + usize::from(self.result.is_some())
+            + usize::from(self.error.is_some());
         let mut map = serializer.serialize_map(Some(count))?;
         map.serialize_entry("jsonrpc", &self.jsonrpc)?;
-        if let Some(id) = self.id { map.serialize_entry("id", &id)?; }
-        if let Some(ref r) = self.result { map.serialize_entry("result", r)?; }
-        if let Some(ref e) = self.error { map.serialize_entry("error", e)?; }
+        if let Some(id) = self.id {
+            map.serialize_entry("id", &id)?;
+        }
+        if let Some(ref r) = self.result {
+            map.serialize_entry("result", r)?;
+        }
+        if let Some(ref e) = self.error {
+            map.serialize_entry("error", e)?;
+        }
         map.end()
     }
 }
@@ -100,12 +126,22 @@ impl serde::Serialize for JsonRpcResponse {
 impl<'de> serde::Deserialize<'de> for JsonRpcResponse {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
         Ok(Self {
-            jsonrpc: obj.get("jsonrpc").and_then(serde_json::Value::as_str).unwrap_or("2.0").to_string(),
+            jsonrpc: obj
+                .get("jsonrpc")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("2.0")
+                .to_string(),
             id: obj.get("id").and_then(serde_json::Value::as_u64),
             result: obj.get("result").cloned(),
-            error: obj.get("error").map(|v| JsonRpcError::deserialize(v.clone())).transpose().map_err(serde::de::Error::custom)?,
+            error: obj
+                .get("error")
+                .map(|v| JsonRpcError::deserialize(v.clone()))
+                .transpose()
+                .map_err(serde::de::Error::custom)?,
         })
     }
 }
@@ -124,7 +160,9 @@ impl serde::Serialize for JsonRpcError {
         let mut map = serializer.serialize_map(Some(count))?;
         map.serialize_entry("code", &self.code)?;
         map.serialize_entry("message", &self.message)?;
-        if let Some(ref d) = self.data { map.serialize_entry("data", d)?; }
+        if let Some(ref d) = self.data {
+            map.serialize_entry("data", d)?;
+        }
         map.end()
     }
 }
@@ -132,10 +170,19 @@ impl serde::Serialize for JsonRpcError {
 impl<'de> serde::Deserialize<'de> for JsonRpcError {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
         Ok(Self {
-            code: obj.get("code").and_then(serde_json::Value::as_i64).unwrap_or(0),
-            message: obj.get("message").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            code: obj
+                .get("code")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            message: obj
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             data: obj.get("data").cloned(),
         })
     }
@@ -227,11 +274,17 @@ pub struct ToolsListResult {
 impl<'de> serde::Deserialize<'de> for ToolsListResult {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
-        let tools = obj.get("tools").map_or_else(|| Ok(Vec::new()), |v| {
-            Vec::<McpToolDef>::deserialize(v.clone()).map_err(serde::de::Error::custom)
-        })?;
-        let next_cursor = obj.get("nextCursor").and_then(serde_json::Value::as_str).map(String::from);
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let tools = obj.get("tools").map_or_else(
+            || Ok(Vec::new()),
+            |v| Vec::<McpToolDef>::deserialize(v.clone()).map_err(serde::de::Error::custom),
+        )?;
+        let next_cursor = obj
+            .get("nextCursor")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
         Ok(Self { tools, next_cursor })
     }
 }
@@ -246,11 +299,16 @@ pub struct McpToolDef {
 impl serde::Serialize for McpToolDef {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let count = 1 + usize::from(self.description.is_some()) + usize::from(self.input_schema.is_some());
+        let count =
+            1 + usize::from(self.description.is_some()) + usize::from(self.input_schema.is_some());
         let mut map = serializer.serialize_map(Some(count))?;
         map.serialize_entry("name", &self.name)?;
-        if let Some(ref d) = self.description { map.serialize_entry("description", d)?; }
-        if let Some(ref s) = self.input_schema { map.serialize_entry("inputSchema", s)?; }
+        if let Some(ref d) = self.description {
+            map.serialize_entry("description", d)?;
+        }
+        if let Some(ref s) = self.input_schema {
+            map.serialize_entry("inputSchema", s)?;
+        }
         map.end()
     }
 }
@@ -258,10 +316,19 @@ impl serde::Serialize for McpToolDef {
 impl<'de> serde::Deserialize<'de> for McpToolDef {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
         Ok(Self {
-            name: obj.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-            description: obj.get("description").and_then(serde_json::Value::as_str).map(String::from),
+            name: obj
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            description: obj
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from),
             input_schema: obj.get("inputSchema").cloned(),
         })
     }
@@ -286,11 +353,17 @@ impl serde::Serialize for ToolCallResult {
 impl<'de> serde::Deserialize<'de> for ToolCallResult {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
-        let content = obj.get("content").map_or_else(|| Ok(Vec::new()), |v| {
-            Vec::<ContentItem>::deserialize(v.clone()).map_err(serde::de::Error::custom)
-        })?;
-        let is_error = obj.get("isError").and_then(serde_json::Value::as_bool).unwrap_or_default();
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let content = obj.get("content").map_or_else(
+            || Ok(Vec::new()),
+            |v| Vec::<ContentItem>::deserialize(v.clone()).map_err(serde::de::Error::custom),
+        )?;
+        let is_error = obj
+            .get("isError")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or_default();
         Ok(Self { content, is_error })
     }
 }
@@ -332,20 +405,43 @@ impl serde::Serialize for ContentItem {
 impl<'de> serde::Deserialize<'de> for ContentItem {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
-        let tag = obj.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let tag = obj
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         match tag {
             "text" => Ok(Self::Text {
-                text: obj.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                text: obj
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             }),
             "image" => Ok(Self::Image {
-                data: obj.get("data").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-                mime_type: obj.get("mimeType").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                data: obj
+                    .get("data")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                mime_type: obj
+                    .get("mimeType")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             }),
             "resource" => Ok(Self::Resource {
-                resource: obj.get("resource").cloned().unwrap_or(serde_json::Value::Null),
+                resource: obj
+                    .get("resource")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
             }),
-            other => Err(serde::de::Error::unknown_variant(other, &["text", "image", "resource"])),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["text", "image", "resource"],
+            )),
         }
     }
 }

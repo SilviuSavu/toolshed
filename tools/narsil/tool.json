@@ -6,7 +6,7 @@
   "max_output": 16384,
   "mcp": {
     "transport": "stdio",
-    "command": "/Users/savusilviu/.toolshed/tools/narsil/run"
+    "command": "/root/.toolshed/tools/narsil/run"
   },
   "health": "which narsil-mcp",
   "tier": "cold"
