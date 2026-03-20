@@ -135,7 +135,17 @@ services:
 
 volumes:
   langfuse-pg-data:
+    external: true
+    name: langfuse_langfuse-pg-data
   langfuse-ch-data:
+    external: true
+    name: langfuse_langfuse-ch-data
   langfuse-ch-logs:
+    external: true
+    name: langfuse_langfuse-ch-logs
   langfuse-redis-data:
+    external: true
+    name: langfuse_langfuse-redis-data
   langfuse-minio-data:
+    external: true
+    name: langfuse_langfuse-minio-data
