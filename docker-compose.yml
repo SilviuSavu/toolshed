@@ -1,17 +1,2 @@
-# Unified infrastructure compose — start via infra.sh, not directly.
-# Uses include: to pull in per-service compose files.
-# Cross-service depends_on ensures correct startup ordering.
-
-include:
-  - path: vault/docker-compose.yml
-  - path: gitlab/docker-compose.yml
-  - path: toolshed/docker-compose.yml
-  - path: unleash/docker-compose.yml
-  - path: langfuse/docker-compose.yml
-  - path: sourcegraph/docker-compose.yml
-  - path: huly/docker-compose.yml
-
-# Cross-service ordering note: Toolshed depends on Vault, GitLab,
-# Sourcegraph, and Unleash at runtime. This is enforced by infra.sh
-# (starts Vault first, unseals, then brings up everything else).
-# Docker Compose include: does not allow overriding imported services.
+# DEPRECATED: Use infra.sh or the per-service compose files under docker/{service}/ instead.
+# This file is kept for reference only. Do not use directly.
