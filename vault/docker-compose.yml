@@ -16,6 +16,11 @@ services:
       - vault-data:/vault/file
       - ./config.hcl:/vault/config/config.hcl:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "vault status"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
 networks:
   default:
