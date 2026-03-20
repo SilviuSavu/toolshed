@@ -61,3 +61,5 @@ volumes:
     external: true
     name: docker_gitlab-data
   gitlab-runner-config:
+    external: true
+    name: gitlab_gitlab-runner-config
