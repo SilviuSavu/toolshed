@@ -28,4 +28,8 @@ networks:
 
 volumes:
   sg-config:
+    external: true
+    name: sourcegraph_sg-config
   sg-data:
+    external: true
+    name: sourcegraph_sg-data
