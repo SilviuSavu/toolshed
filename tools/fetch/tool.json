@@ -1,0 +1,15 @@
+{
+  "name": "fetch",
+  "description": "HTTP fetch — retrieve web pages, APIs, and resources with content extraction",
+  "category": "networking",
+  "type": "mcp",
+  "max_output": 65536,
+  "mcp": {
+    "transport": "stdio",
+    "command": "mcp-server-fetch",
+    "args": [],
+    "env": {}
+  },
+  "health": "which mcp-server-fetch",
+  "tier": "cold"
+}

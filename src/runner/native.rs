@@ -67,10 +67,17 @@ pub async fn run(
                 Ok(stdout)
             } else {
                 let code = output.status.code().unwrap_or(1);
+                let error_detail = if !stderr.is_empty() {
+                    stderr
+                } else if !stdout.is_empty() {
+                    stdout
+                } else {
+                    format!("(no output captured, exit code {code})")
+                };
                 Err(ToolshedError::ToolFailed {
                     tool: manifest.name.clone(),
                     code,
-                    stderr: if stderr.is_empty() { stdout } else { stderr },
+                    stderr: error_detail,
                 })
             }
         }

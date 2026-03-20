@@ -1,0 +1,103 @@
+{
+  "name": "trivy",
+  "description": "Security scanner — vulnerabilities, misconfigurations, secrets, SBOM for containers and code",
+  "category": "security",
+  "type": "native",
+  "max_output": 65536,
+  "health": "which trivy",
+  "tier": "cold",
+  "commands": {
+    "fs": {
+      "description": "Scan a filesystem path for vulnerabilities, misconfigurations, and secrets",
+      "args": {
+        "target": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Directory or file path to scan"
+        },
+        "severity": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Severities to report (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format (table, json, sarif, cyclonedx, spdx)"
+        },
+        "scanners": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Scanners to enable (vuln, misconfig, secret, license)"
+        }
+      }
+    },
+    "repo": {
+      "description": "Scan a remote git repository for vulnerabilities",
+      "args": {
+        "url": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Git repository URL to scan"
+        },
+        "branch": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Branch to scan (default: default branch)"
+        },
+        "severity": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Severities to report"
+        }
+      }
+    },
+    "sbom": {
+      "description": "Generate a software bill of materials (SBOM) for a target",
+      "args": {
+        "target": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Directory or image to generate SBOM for"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "SBOM format (cyclonedx, spdx, spdx-json)"
+        }
+      }
+    },
+    "image": {
+      "description": "Scan a container image for vulnerabilities",
+      "args": {
+        "image": {
+          "type": "string",
+          "required": true,
+          "positional": true,
+          "description": "Container image to scan (e.g. nginx:latest)"
+        },
+        "severity": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Severities to report"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "positional": false,
+          "description": "Output format"
+        }
+      }
+    }
+  }
+}

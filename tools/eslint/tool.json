@@ -1,0 +1,15 @@
+{
+  "name": "eslint",
+  "description": "ESLint code analysis — lint JavaScript/TypeScript, report issues, suggest fixes",
+  "category": "linting",
+  "type": "mcp",
+  "max_output": 32768,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@eslint/mcp"],
+    "env": {}
+  },
+  "health": "npx -y @eslint/mcp --help >/dev/null 2>&1",
+  "tier": "cold"
+}

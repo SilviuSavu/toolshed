@@ -134,6 +134,7 @@ fn clear_introspection_cache(tool_name: &str) {
 }
 
 /// Listen for recovery requests and spawn recovery tasks.
+#[allow(clippy::print_stderr)]
 pub async fn run_recovery_listener(
     mut rx: tokio::sync::mpsc::Receiver<String>,
     registry: Arc<Registry>,
@@ -174,14 +175,27 @@ pub async fn run_recovery_listener(
                     let result = recover_tool(
                         &tool_name,
                         &registry,
-                        daemon_state,
+                        daemon_state.clone(),
                         vault_addr.as_deref(),
                         vault_token.as_deref(),
                         &http_client,
                     )
                     .await;
 
-                    if let Err(_e) = result {
+                    if let Err(e) = result {
+                        eprintln!(
+                            "FATAL: recovery exhausted for tool '{tool_name}': {e}"
+                        );
+                        // Record the failure in state so /health can report
+                        // it in the brief window before shutdown.
+                        {
+                            let mut state = daemon_state.write().await;
+                            if let Some(ts) =
+                                state.tool_status.get_mut(&tool_name)
+                            {
+                                ts.mark_down(&format!("recovery exhausted: {e}"));
+                            }
+                        }
                         std::process::exit(1);
                     }
                 });

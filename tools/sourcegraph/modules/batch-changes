@@ -610,9 +610,9 @@ cmd_health() {
   echo "Checking GitLab connectivity ..."
   if load_gitlab_token 2>/dev/null; then
     local gl_status
-    gl_status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
+    gl_status=$(curl --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' -s \
       -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-      "$GITLAB_URL/api/v4/version" 2>/dev/null || echo "000")
+      "$GITLAB_URL/api/v4/version" 2>/dev/null) || gl_status="000"
     if [[ "$gl_status" == "200" ]]; then
       echo "  GitLab: OK ($GITLAB_URL)"
     else
@@ -626,8 +626,8 @@ cmd_health() {
 
   echo "Checking Vault connectivity ..."
   local vault_status
-  vault_status=$(curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
-    "$VAULT_ADDR/v1/sys/health" 2>/dev/null || echo "000")
+  vault_status=$(curl --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' -s \
+    "$VAULT_ADDR/v1/sys/health" 2>/dev/null) || vault_status="000"
   if [[ "$vault_status" == "200" ]]; then
     echo "  Vault: OK ($VAULT_ADDR)"
   else

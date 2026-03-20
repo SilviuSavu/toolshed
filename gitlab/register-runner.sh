@@ -2,7 +2,7 @@
 set -e
 # Wait for GitLab readiness, register runner if needed, then start.
 
-until curl -sf http://gitlab/-/readiness >/dev/null 2>&1; do
+until curl -sf http://gitlab/users/sign_in >/dev/null 2>&1; do
   echo "Waiting for GitLab..."; sleep 5
 done
 

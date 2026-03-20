@@ -4,12 +4,12 @@
   "category": "version-control",
   "type": "mcp",
   "max_output": 32768,
-  "health": "npx -y @modelcontextprotocol/server-git --help >/dev/null 2>&1",
+  "health": "npx -y @mseep/git-mcp-server --help >/dev/null 2>&1",
   "tier": "cold",
   "mcp": {
     "transport": "stdio",
     "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-git"],
+    "args": ["-y", "@mseep/git-mcp-server"],
     "env": {}
   }
 }

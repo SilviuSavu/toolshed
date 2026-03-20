@@ -23,9 +23,11 @@ pub async fn call_tool_with_state(
     tool: &Tool,
     tool_name: &str,
     arguments: serde_json::Value,
-    _timeout: Option<u64>,
+    timeout: Option<u64>,
     daemon_state: Option<&crate::daemon::state::DaemonState>,
 ) -> Result<String, ToolshedError> {
+    let timeout_secs = timeout.unwrap_or(crate::config::DEFAULT_TOOL_TIMEOUT_SECS);
+    let timeout_duration = std::time::Duration::from_secs(timeout_secs);
     let mcp_cfg = tool
         .manifest
         .mcp
@@ -43,6 +45,7 @@ pub async fn call_tool_with_state(
     let headers = env::interpolate_map_with_state(&mcp_cfg.headers, None)?;
 
     let client = reqwest::Client::builder()
+        .timeout(timeout_duration)
         .build()
         .map_err(|e| ToolshedError::McpHttpError {
             tool: tool.manifest.name.clone(),
@@ -114,32 +117,36 @@ pub async fn call_tool_with_state(
             reason: "no result in tools/call response".to_string(),
         })?;
 
+    extract_call_text(result_val, &tool.manifest.name)
+}
+
+/// Parse a `tools/call` result value into output text.
+fn extract_call_text(
+    result_val: serde_json::Value,
+    tool_name: &str,
+) -> Result<String, ToolshedError> {
     let call_result: ToolCallResult =
         serde_json::from_value(result_val).map_err(|e| ToolshedError::McpBadResponse {
-            tool: tool.manifest.name.clone(),
+            tool: tool_name.to_string(),
             reason: format!("bad tools/call response: {e}"),
         })?;
 
+    let text = call_result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+
     if call_result.is_error {
-        let text = call_result
-            .content
-            .iter()
-            .filter_map(|c| c.as_text())
-            .collect::<Vec<_>>()
-            .join("\n");
         return Err(ToolshedError::McpRpcError {
-            tool: tool.manifest.name.clone(),
+            tool: tool_name.to_string(),
             code: -1,
             message: text,
         });
     }
 
-    Ok(call_result
-        .content
-        .iter()
-        .filter_map(|c| c.as_text())
-        .collect::<Vec<_>>()
-        .join("\n"))
+    Ok(text)
 }
 
 /// List tools via MCP HTTP.

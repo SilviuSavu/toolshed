@@ -1,0 +1,17 @@
+{
+  "name": "brave-search",
+  "description": "Web search via Brave Search API — queries, news, local results",
+  "category": "search",
+  "type": "mcp",
+  "max_output": 16384,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+    "env": {
+      "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+    }
+  },
+  "health": "npx -y @modelcontextprotocol/server-brave-search --help >/dev/null 2>&1",
+  "tier": "cold"
+}

@@ -16,11 +16,45 @@ DB_PATH="$DB_DIR/deepsearch.db"
 TOOLSHED_URL="${TOOLSHED_URL:-http://127.0.0.1:8081}"
 VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
 VAULT_TOKEN="${VAULT_TOKEN:-toolshed-dev-token}"
-MAX_STEPS=10
-MAX_TOOL_OUTPUT=4000
+MAX_DURATION_SECS=300
+MAX_TOOL_OUTPUT=65536
 PROVIDER="${DEEPSEARCH_PROVIDER:-zai}"
+LANGFUSE_PROMPT_NAME="deepsearch-instructions"
+LANGFUSE_PROMPT_LABEL="production"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Langfuse prompt fetching
+# ---------------------------------------------------------------------------
+fetch_langfuse_prompt() {
+    local vault_data
+    vault_data=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" \
+        "$VAULT_ADDR/v1/secret/data/langfuse") || return 1
+
+    local base_url public_key secret_key
+    base_url=$(echo "$vault_data" | jq -r '.data.data.base_url // empty')
+    public_key=$(echo "$vault_data" | jq -r '.data.data.public_key // empty')
+    secret_key=$(echo "$vault_data" | jq -r '.data.data.secret_key // empty')
+
+    [[ -z "$base_url" || -z "$public_key" || -z "$secret_key" ]] && return 1
+
+    local resp
+    resp=$(curl -sf --max-time 10 \
+        -u "$public_key:$secret_key" \
+        "$base_url/api/public/v2/prompts/$LANGFUSE_PROMPT_NAME?label=$LANGFUSE_PROMPT_LABEL") || return 1
+
+    # Handle both text prompts (string) and chat prompts (array)
+    local prompt
+    prompt=$(echo "$resp" | jq -r '
+        if (.prompt | type) == "string" then .prompt
+        elif (.prompt | type) == "array" then [.prompt[] | .content // empty] | join("\n\n")
+        else empty end
+    ')
+
+    [[ -z "$prompt" ]] && return 1
+    echo "$prompt"
+}
 
 LLM_API_KEY=""
 LLM_BASE_URL=""
@@ -50,7 +84,7 @@ load_provider() {
     LLM_BASE_URL="$default_url"
 
     local vault_data
-    vault_data=$(curl -sf -H "X-Vault-Token: $VAULT_TOKEN" \
+    vault_data=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" \
         "$VAULT_ADDR/v1/secret/data/$vault_path") \
         || die "cannot reach Vault for provider $provider"
 
@@ -81,7 +115,7 @@ TOOLS_JSON='[
   {"type":"function","function":{"name":"lsp__find_references","description":"Find all references to a symbol (compiler-accurate via LSP)","parameters":{"type":"object","properties":{"file_path":{"type":"string","description":"Full file path"},"symbol_name":{"type":"string","description":"Symbol name"}},"required":["file_path","symbol_name"]}}}
 ]'
 
-SYSTEM_PROMPT='You are a code research assistant. Investigate questions about codebases by using the provided tools.
+FALLBACK_PROMPT='You are a code research assistant. Investigate questions about codebases by using the provided tools.
 
 Strategy:
 - Search broadly first (keyword_search, hybrid_search)
@@ -92,33 +126,40 @@ Strategy:
 When you have enough information, respond with your final answer in markdown.
 Do not call tools unnecessarily — be strategic and efficient.'
 
+# Fetch from Langfuse, fall back to hardcoded prompt
+SYSTEM_PROMPT=$(fetch_langfuse_prompt) || SYSTEM_PROMPT="$FALLBACK_PROMPT"
+
 # ---------------------------------------------------------------------------
 # LLM call — returns raw response JSON
 # ---------------------------------------------------------------------------
 llm_call() {
     local messages_json="$1"
-    local payload
-    payload=$(jq -n \
+    local tmpdir_llm
+    tmpdir_llm=$(mktemp -d)
+
+    echo "$messages_json" > "$tmpdir_llm/messages.json"
+    jq -n \
         --arg model "$LLM_MODEL" \
-        --argjson messages "$messages_json" \
+        --slurpfile messages "$tmpdir_llm/messages.json" \
         --argjson tools "$TOOLS_JSON" \
         '{
             model: $model,
-            messages: $messages,
+            messages: $messages[0],
             tools: $tools,
             tool_choice: "auto",
             max_tokens: 131072,
             thinking: {type: "enabled", clear_thinking: false}
-        }')
+        }' > "$tmpdir_llm/payload.json"
 
     local http_response http_code body
     http_response=$(curl -s --max-time 300 -w '\n%{http_code}' \
         -H "Authorization: Bearer $LLM_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "$payload" \
+        -d @"$tmpdir_llm/payload.json" \
         "$LLM_BASE_URL")
     http_code=$(echo "$http_response" | tail -1)
     body=$(echo "$http_response" | sed '$d')
+    rm -rf "$tmpdir_llm"
 
     if [[ "$http_code" != "200" ]]; then
         local err_msg
@@ -183,24 +224,27 @@ SQL
 }
 
 generate_id() {
-    printf '%s-%s' "$(date +%s)" "$(head -c4 /dev/urandom | xxd -p)"
+    printf '%s-%s' "$(date +%s)" "$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')"
 }
 
 # ---------------------------------------------------------------------------
 # Main agent loop
 # ---------------------------------------------------------------------------
 cmd_deepsearch() {
-    local question="" provider="$PROVIDER"
+    local question="" provider="$PROVIDER" duration=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --question) question="$2";  shift 2 ;;
             --provider) provider="$2";  shift 2 ;;
             --model)    DEEPSEARCH_MODEL="$2"; shift 2 ;;
+            --duration) duration="$2";  shift 2 ;;
             -*)         die "unknown flag: $1" ;;
             *)          question="$1";  shift ;;
         esac
     done
+
+    [[ -n "$duration" ]] && MAX_DURATION_SECS="$duration"
 
     [[ -z "$question" ]] && die "question is required"
     PROVIDER="$provider"
@@ -214,44 +258,55 @@ cmd_deepsearch() {
     q_escaped=$(echo "$question" | sed "s/'/''/g")
     sqlite3 "$DB_PATH" "INSERT INTO conversations (id, question, provider, model) VALUES ('$conv_id', '$q_escaped', '$provider', '$LLM_MODEL');"
 
-    local messages
-    messages=$(jq -n \
+    # Use a temp file for messages to avoid ARG_MAX overflow on large conversations
+    local msg_file
+    msg_file=$(mktemp)
+    jq -n \
         --arg system "$SYSTEM_PROMPT" \
         --arg question "$question" \
         '[
             {"role": "system", "content": $system},
             {"role": "user", "content": $question}
-        ]')
+        ]' > "$msg_file"
 
     local step=0
     local answer=""
     local final_status="completed"
+    local start_ts
+    start_ts=$(date +%s)
 
-    while [[ $step -lt $MAX_STEPS ]]; do
+    while true; do
         step=$((step + 1))
 
+        # Check timeout
+        local elapsed=$(( $(date +%s) - start_ts ))
+        if [[ $elapsed -ge $MAX_DURATION_SECS ]]; then
+            break
+        fi
+
         local raw_response
-        raw_response=$(llm_call "$messages")
+        raw_response=$(llm_call "$(cat "$msg_file")")
 
         local finish_reason
         finish_reason=$(echo "$raw_response" | jq -r '.choices[0].finish_reason // "stop"')
 
-        local message
-        message=$(echo "$raw_response" | jq -c '.choices[0].message')
+        local msg_tmp
+        msg_tmp=$(mktemp)
+        echo "$raw_response" | jq -c '.choices[0].message' > "$msg_tmp"
 
         # Append assistant message to history (preserves tool_calls structure)
-        messages=$(echo "$messages" | jq --argjson msg "$message" '. + [$msg]')
+        jq --slurpfile msg "$msg_tmp" '. + $msg' "$msg_file" > "$msg_file.tmp" && mv "$msg_file.tmp" "$msg_file"
 
         if [[ "$finish_reason" == "tool_calls" ]]; then
             # Model wants to call tools — execute each and append tool results
             local num_calls
-            num_calls=$(echo "$message" | jq '.tool_calls | length')
+            num_calls=$(jq '.tool_calls | length' "$msg_tmp")
 
             for ((i = 0; i < num_calls; i++)); do
                 local call_id tool_name arguments
-                call_id=$(echo "$message" | jq -r ".tool_calls[$i].id")
-                tool_name=$(echo "$message" | jq -r ".tool_calls[$i].function.name")
-                arguments=$(echo "$message" | jq -r ".tool_calls[$i].function.arguments")
+                call_id=$(jq -r ".tool_calls[$i].id" "$msg_tmp")
+                tool_name=$(jq -r ".tool_calls[$i].function.name" "$msg_tmp")
+                arguments=$(jq -r ".tool_calls[$i].function.arguments" "$msg_tmp")
 
                 # arguments comes as string from the API, parse it
                 local args_obj
@@ -260,56 +315,67 @@ cmd_deepsearch() {
                 local result
                 result=$(ts_call "$tool_name" "$args_obj")
 
-                # Append tool result message
-                messages=$(echo "$messages" | jq \
+                # Append tool result message via temp file to avoid ARG_MAX
+                local tool_msg
+                tool_msg=$(mktemp)
+                jq -n \
                     --arg role "tool" \
                     --arg content "$result" \
                     --arg tool_call_id "$call_id" \
-                    '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
+                    '{role: $role, content: $content, tool_call_id: $tool_call_id}' > "$tool_msg"
+                jq --slurpfile t "$tool_msg" '. + $t' "$msg_file" > "$msg_file.tmp" && mv "$msg_file.tmp" "$msg_file"
+                rm -f "$tool_msg"
             done
         else
             # Model responded with content — this is the final answer
-            answer=$(echo "$message" | jq -r '.content // empty')
+            # Handle both string content and array content (thinking blocks)
+            answer=$(jq -r 'if (.content | type) == "array" then [.content[] | select(.type == "text") | .text] | join("\n") elif .content then .content else empty end' "$msg_tmp")
+            rm -f "$msg_tmp"
             break
         fi
+        rm -f "$msg_tmp"
     done
 
-    # If we hit MAX_STEPS without a final answer, force one
-    if [[ -z "$answer" && $step -ge $MAX_STEPS ]]; then
-        messages=$(echo "$messages" | jq \
-            '. + [{"role": "user", "content": "Synthesize your final answer now based on all research so far."}]')
+    # If we hit the timeout without a final answer, force one
+    if [[ -z "$answer" ]]; then
+        jq '. + [{"role": "user", "content": "Synthesize your final answer now based on all research so far."}]' \
+            "$msg_file" > "$msg_file.tmp" && mv "$msg_file.tmp" "$msg_file"
 
         # Call without tools to force a text response
-        local final_payload
-        final_payload=$(jq -n \
+        local final_payload_file
+        final_payload_file=$(mktemp)
+        jq -n \
             --arg model "$LLM_MODEL" \
-            --argjson messages "$messages" \
-            '{model: $model, messages: $messages, max_tokens: 131072, thinking: {type: "enabled", clear_thinking: false}}')
+            --slurpfile messages "$msg_file" \
+            '{model: $model, messages: $messages[0], max_tokens: 131072, thinking: {type: "enabled", clear_thinking: false}}' \
+            > "$final_payload_file"
 
         local final_resp
         final_resp=$(curl -s --max-time 300 \
             -H "Authorization: Bearer $LLM_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "$final_payload" \
+            -d @"$final_payload_file" \
             "$LLM_BASE_URL")
+        rm -f "$final_payload_file"
 
-        answer=$(echo "$final_resp" | jq -r '.choices[0].message.content // empty')
-        [[ -z "$answer" ]] && answer="Failed to synthesize answer after $MAX_STEPS steps"
+        answer=$(echo "$final_resp" | jq -r '.choices[0].message | if (.content | type) == "array" then [.content[] | select(.type == "text") | .text] | join("\n") elif .content then .content else empty end')
+        [[ -z "$answer" ]] && answer="Failed to synthesize answer after $step steps (${MAX_DURATION_SECS}s timeout)"
     fi
 
+    local total_secs=$(( $(date +%s) - start_ts ))
+
     # Store in SQLite
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    echo "$answer" > "$tmpdir/answer"
-    echo "$messages" > "$tmpdir/messages"
-    sqlite3 "$DB_PATH" "UPDATE conversations SET answer = readfile('$tmpdir/answer'), messages = readfile('$tmpdir/messages'), status = '$final_status', steps = $step, completed_at = datetime('now') WHERE id = '$conv_id';"
-    rm -rf "$tmpdir"
+    local answer_file
+    answer_file=$(mktemp)
+    echo "$answer" > "$answer_file"
+    sqlite3 "$DB_PATH" "UPDATE conversations SET answer = readfile('$answer_file'), messages = readfile('$msg_file'), status = '$final_status', steps = $step, completed_at = datetime('now') WHERE id = '$conv_id';"
+    rm -f "$answer_file" "$msg_file"
 
     echo "# Deep Search Result"
     echo ""
     echo "**ID:** $conv_id"
     echo "**Provider:** $provider ($LLM_MODEL)"
-    echo "**Steps:** $step"
+    echo "**Steps:** $step | **Duration:** ${total_secs}s"
     echo "**Status:** $final_status"
     echo ""
     echo "---"

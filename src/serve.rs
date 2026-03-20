@@ -35,12 +35,21 @@ struct IncomingJsonRpc {
 impl<'de> serde::Deserialize<'de> for IncomingJsonRpc {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
         Ok(Self {
-            _jsonrpc: obj.get("jsonrpc").and_then(serde_json::Value::as_str).unwrap_or("2.0").to_string(),
+            _jsonrpc: obj
+                .get("jsonrpc")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("2.0")
+                .to_string(),
             id: obj.get("id").cloned(),
-            method: obj.get("method").and_then(serde_json::Value::as_str)
-                .ok_or_else(|| serde::de::Error::missing_field("method"))?.to_string(),
+            method: obj
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| serde::de::Error::missing_field("method"))?
+                .to_string(),
             params: obj.get("params").cloned(),
         })
     }
@@ -57,12 +66,21 @@ struct OutgoingJsonRpc {
 impl serde::Serialize for OutgoingJsonRpc {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let count = 1 + usize::from(self.id.is_some()) + usize::from(self.result.is_some()) + usize::from(self.error.is_some());
+        let count = 1
+            + usize::from(self.id.is_some())
+            + usize::from(self.result.is_some())
+            + usize::from(self.error.is_some());
         let mut map = serializer.serialize_map(Some(count))?;
         map.serialize_entry("jsonrpc", &self.jsonrpc)?;
-        if let Some(ref id) = self.id { map.serialize_entry("id", id)?; }
-        if let Some(ref result) = self.result { map.serialize_entry("result", result)?; }
-        if let Some(ref error) = self.error { map.serialize_entry("error", error)?; }
+        if let Some(ref id) = self.id {
+            map.serialize_entry("id", id)?;
+        }
+        if let Some(ref result) = self.result {
+            map.serialize_entry("result", result)?;
+        }
+        if let Some(ref error) = self.error {
+            map.serialize_entry("error", error)?;
+        }
         map.end()
     }
 }
@@ -125,8 +143,16 @@ struct AppState {
 
 // ── Build tool index ──
 
-async fn build_tool_index(registry: &Registry, category_filter: Option<&str>) -> Vec<ExposedTool> {
+/// Returned by `build_tool_index`: tools that were indexed and tools that
+/// failed MCP introspection (name → error message).
+struct IndexResult {
+    exposed: Vec<ExposedTool>,
+    failures: Vec<(String, String)>,
+}
+
+async fn build_tool_index(registry: &Registry, category_filter: Option<&str>) -> IndexResult {
     let mut exposed = Vec::new();
+    let mut failures = Vec::new();
 
     for (name, tool) in &registry.tools {
         if let Some(cat) = category_filter {
@@ -179,15 +205,15 @@ async fn build_tool_index(registry: &Registry, category_filter: Option<&str>) ->
                         });
                     }
                 }
-                #[allow(clippy::print_stderr)]
                 Err(e) => {
-                    eprintln!("warning: failed to introspect MCP tool '{name}': {e}");
+                    let msg = format!("introspection failed: {e}");
+                    failures.push((name.clone(), msg));
                 }
             },
         }
     }
 
-    exposed
+    IndexResult { exposed, failures }
 }
 
 fn build_native_schema(cmd: &crate::manifest::CommandDef) -> serde_json::Value {
@@ -359,7 +385,8 @@ struct MessageQuery {
 impl<'de> serde::Deserialize<'de> for MessageQuery {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let map = std::collections::HashMap::<String, String>::deserialize(deserializer)?;
-        let session_id = map.get("sessionId")
+        let session_id = map
+            .get("sessionId")
             .ok_or_else(|| serde::de::Error::missing_field("sessionId"))?
             .clone();
         Ok(Self { session_id })
@@ -377,7 +404,17 @@ async fn handle_messages(
 
     // Only send responses (not notification acks) through SSE
     if resp.id.is_some() {
-        let json_str = serde_json::to_string(&resp).unwrap_or_default();
+        let json_str = serde_json::to_string(&resp).unwrap_or_else(|e| {
+            let fallback = OutgoingJsonRpc::error(
+                resp.id.clone(),
+                -32603,
+                format!("response serialization failed: {e}"),
+            );
+            serde_json::to_string(&fallback).unwrap_or_else(|_| {
+                r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"serialization failed"}}"#
+                    .to_string()
+            })
+        });
         let sessions = state.sessions.lock().await;
         if let Some(tx) = sessions.get(&session_id) {
             let _ = tx.send(json_str);
@@ -404,8 +441,16 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     let (uptime, any_recovering, tools_json, next_refresh, vault_reachable) =
         snapshot_health(&*state.daemon_state.read().await);
 
+    let any_down = tools_json.values().any(|v| {
+        matches!(
+            v.get("status").and_then(|s| s.as_str()),
+            Some("down" | "failed_to_load")
+        )
+    });
     let overall_status = if any_recovering {
         "recovering"
+    } else if any_down {
+        "degraded"
     } else {
         "healthy"
     };
@@ -418,7 +463,7 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             "vault_reachable": vault_reachable,
         }
     });
-    let status_code = if any_recovering {
+    let status_code = if any_recovering || any_down {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::OK
@@ -446,6 +491,7 @@ fn snapshot_health(
             Status::Up => "up",
             Status::Down => "down",
             Status::Recovering => "recovering",
+            Status::FailedToLoad => "failed_to_load",
         };
         let mut tool_obj = serde_json::Map::new();
         tool_obj.insert("status".to_string(), serde_json::json!(status_str));
@@ -541,6 +587,17 @@ async fn rpc_tools_call(
                         ),
                     );
                 }
+                Status::FailedToLoad => {
+                    return OutgoingJsonRpc::error(
+                        id,
+                        -32003,
+                        format!(
+                            "Tool '{}' failed to load: {}",
+                            exposed.tool_name,
+                            ts.last_error.as_deref().unwrap_or("unknown error")
+                        ),
+                    );
+                }
                 Status::Up => {}
             }
         }
@@ -580,6 +637,7 @@ async fn rpc_daemon_health(state: &AppState, id: Option<serde_json::Value>) -> O
                 Status::Up => "up",
                 Status::Down => "down",
                 Status::Recovering => "recovering",
+                Status::FailedToLoad => "failed_to_load",
             };
             let mut obj = serde_json::Map::new();
             obj.insert("status".to_string(), serde_json::json!(status_str));
@@ -710,11 +768,26 @@ pub async fn serve(port: u16, category: Option<String>) -> Result<(), ToolshedEr
     let registry = Arc::new(registry);
 
     eprintln!("indexing tools...");
-    let exposed = build_tool_index(&registry, category.as_deref()).await;
+    let index_result = build_tool_index(&registry, category.as_deref()).await;
 
-    eprintln!("indexed {} tools:", exposed.len());
-    for tool in &exposed {
+    eprintln!("indexed {} tools:", index_result.exposed.len());
+    for tool in &index_result.exposed {
         eprintln!("  {}", tool.namespaced_name);
+    }
+
+    if !index_result.failures.is_empty() {
+        eprintln!(
+            "WARNING: {} tool(s) failed to index:",
+            index_result.failures.len()
+        );
+        for (name, err) in &index_result.failures {
+            eprintln!("  {name}: {err}");
+        }
+    }
+
+    // Log registry-level errors (bad manifests, missing scripts, etc.)
+    for (name, err) in &registry.errors {
+        eprintln!("warning: skipping tool '{name}': {err}");
     }
 
     // Parse vault-env.sh for secret definitions
@@ -733,8 +806,19 @@ pub async fn serve(port: u16, category: Option<String>) -> Result<(), ToolshedEr
     let (cancel, daemon_state) =
         daemon::spawn_daemon(registry.clone(), secret_defs, vault_addr, vault_token).await;
 
+    // Mark tools that failed introspection — these cannot be recovered
+    // by the daemon and require a configuration fix + restart.
+    {
+        let mut st = daemon_state.write().await;
+        for (tool_name, error_msg) in &index_result.failures {
+            if let Some(ts) = st.tool_status.get_mut(tool_name) {
+                ts.mark_failed_to_load(error_msg);
+            }
+        }
+    }
+
     let state = Arc::new(AppState {
-        exposed,
+        exposed: index_result.exposed,
         registry,
         sessions: Mutex::new(HashMap::new()),
         daemon_state,

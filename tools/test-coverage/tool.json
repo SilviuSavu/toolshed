@@ -1,0 +1,15 @@
+{
+  "name": "test-coverage",
+  "description": "Test coverage analysis — parse and query coverage reports",
+  "category": "testing",
+  "type": "mcp",
+  "max_output": 16384,
+  "mcp": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "test-coverage-mcp"],
+    "env": {}
+  },
+  "health": "npx -y test-coverage-mcp --help >/dev/null 2>&1",
+  "tier": "cold"
+}

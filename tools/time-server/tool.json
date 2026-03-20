@@ -1,0 +1,15 @@
+{
+  "name": "time-server",
+  "description": "Time utilities — current time, timezone conversion, date arithmetic",
+  "category": "utilities",
+  "type": "mcp",
+  "max_output": 4096,
+  "mcp": {
+    "transport": "stdio",
+    "command": "mcp-server-time",
+    "args": [],
+    "env": {}
+  },
+  "health": "which mcp-server-time",
+  "tier": "cold"
+}

@@ -33,16 +33,20 @@ pub async fn probe_tool(tool: &Tool, _daemon_state: Option<&DaemonState>) -> Pro
     };
 
     match health::check_one(tool).await {
-        Some(true) => ProbeResult { tool_name: name, healthy: true, error: None },
-        Some(false) => ProbeResult {
+        Some(Ok(())) => ProbeResult {
+            tool_name: name,
+            healthy: true,
+            error: None,
+        },
+        Some(Err(detail)) => ProbeResult {
             tool_name: name,
             healthy: false,
-            error: Some("health command failed".to_string()),
+            error: Some(detail),
         },
         None => ProbeResult {
             tool_name: name,
             healthy: false,
-            error: Some("health check returned no result".to_string()),
+            error: Some("no health command configured".to_string()),
         },
     }
 }
@@ -104,7 +108,7 @@ pub async fn run_health_loop(
             state
                 .tool_status
                 .iter()
-                .filter(|(_, ts)| ts.in_grace_period())
+                .filter(|(_, ts)| ts.in_grace_period() || ts.status == Status::FailedToLoad)
                 .map(|(name, _)| name.clone())
                 .collect()
         };

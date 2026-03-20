@@ -163,8 +163,28 @@ impl McpStdioSession {
                     reason: e.to_string(),
                 })?;
         if n == 0 {
+            // Try to read stderr for crash diagnostics
+            let reason = if let Some(stderr) = self.child.stderr.take() {
+                let mut buf = String::new();
+                let mut stderr_reader = BufReader::new(stderr);
+                // Read available stderr (non-blocking best-effort)
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    stderr_reader.read_line(&mut buf),
+                )
+                .await;
+                let trimmed = buf.trim();
+                if trimmed.is_empty() {
+                    "EOF on stdout (no stderr output)".to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                "EOF on stdout".to_string()
+            };
             return Err(ToolshedError::McpCrashed {
                 tool: self.tool_name.clone(),
+                reason,
             });
         }
         Ok(line)
@@ -226,28 +246,42 @@ pub async fn call_tool_with_state(
     tool: &Tool,
     tool_name: &str,
     arguments: serde_json::Value,
-    _timeout: Option<u64>,
+    timeout: Option<u64>,
     daemon_state: Option<&DaemonState>,
 ) -> Result<String, ToolshedError> {
-    let mut session = McpStdioSession::spawn(tool, daemon_state)?;
-    session.initialize().await?;
+    let timeout_secs = timeout.unwrap_or(crate::config::DEFAULT_TOOL_TIMEOUT_SECS);
+    let manifest_name = tool.manifest.name.clone();
 
-    let params = ToolsCallParams {
-        name: tool_name.to_string(),
-        arguments,
+    let call_future = async {
+        let mut session = McpStdioSession::spawn(tool, daemon_state)?;
+        session.initialize().await?;
+
+        let params = ToolsCallParams {
+            name: tool_name.to_string(),
+            arguments,
+        };
+
+        let result = session
+            .send_request("tools/call", Some(serde_json::to_value(params)?))
+            .await?;
+
+        let call_result: ToolCallResult =
+            serde_json::from_value(result).map_err(|e| ToolshedError::McpBadResponse {
+                tool: manifest_name.clone(),
+                reason: format!("bad tools/call response: {e}"),
+            })?;
+
+        session.shutdown().await;
+        Ok::<(ToolCallResult, String), ToolshedError>((call_result, manifest_name))
     };
 
-    let result = session
-        .send_request("tools/call", Some(serde_json::to_value(params)?))
-        .await?;
-
-    let call_result: ToolCallResult =
-        serde_json::from_value(result).map_err(|e| ToolshedError::McpBadResponse {
-            tool: tool.manifest.name.clone(),
-            reason: format!("bad tools/call response: {e}"),
-        })?;
-
-    session.shutdown().await;
+    let (call_result, _manifest_name) =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), call_future)
+            .await
+            .map_err(|_| ToolshedError::ToolTimeout {
+                tool: tool.manifest.name.clone(),
+                timeout_secs,
+            })??;
 
     if call_result.is_error {
         let text = call_result

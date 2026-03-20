@@ -95,7 +95,10 @@ pub async fn vault_get(
         reason: format!("failed to parse Vault response for {path}: {e}"),
     })?;
 
-    let lease_duration = body.get("lease_duration").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let lease_duration = body
+        .get("lease_duration")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
 
     let value = body
         .get("data")
@@ -152,9 +155,11 @@ pub async fn vault_approle_login(
                 reason: format!("failed to parse AppRole response: {e}"),
             })?;
 
-    let auth = auth_body.get("auth").ok_or(ToolshedError::VaultAuthFailed {
-        reason: "missing 'auth' in AppRole response".to_string(),
-    })?;
+    let auth = auth_body
+        .get("auth")
+        .ok_or(ToolshedError::VaultAuthFailed {
+            reason: "missing 'auth' in AppRole response".to_string(),
+        })?;
 
     let client_token = auth
         .get("client_token")
@@ -164,7 +169,10 @@ pub async fn vault_approle_login(
         })?
         .to_string();
 
-    let lease_duration = auth.get("lease_duration").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let lease_duration = auth
+        .get("lease_duration")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let ttl = if lease_duration == 0 {
         Duration::from_secs(AUTH_DEFAULT_TTL_SECS)
     } else {

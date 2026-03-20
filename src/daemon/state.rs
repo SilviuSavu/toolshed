@@ -10,6 +10,9 @@ pub enum Status {
     Up,
     Down,
     Recovering,
+    /// Tool failed during introspection/loading and cannot be recovered
+    /// by the daemon. Requires a code or configuration fix and a restart.
+    FailedToLoad,
 }
 
 #[derive(Debug)]
@@ -34,6 +37,12 @@ impl ToolStatus {
             recovering_attempt: None,
             grace_until: None,
         }
+    }
+
+    pub fn mark_failed_to_load(&mut self, error: &str) {
+        self.status = Status::FailedToLoad;
+        self.last_error = Some(truncate_error(error));
+        self.last_check = Instant::now();
     }
 
     pub fn mark_down(&mut self, error: &str) {
@@ -65,10 +74,11 @@ impl ToolStatus {
 }
 
 fn truncate_error(err: &str) -> String {
-    if err.len() <= 256 {
+    let chars: Vec<char> = err.chars().collect();
+    if chars.len() <= 256 {
         err.to_string()
     } else {
-        let mut s = err[..256].to_string();
+        let mut s: String = chars[..256].iter().collect();
         s.push_str("...");
         s
     }

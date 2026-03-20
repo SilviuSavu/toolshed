@@ -39,10 +39,16 @@ pub async fn spawn_daemon(
     if let (Some(ref addr), Some(ref token)) = (&vault_addr, &vault_token) {
         if !secret_defs.is_empty() {
             let client = reqwest::Client::new();
-            if let Ok(secrets) = auth::resolve_all_secrets(&client, addr, token, &secret_defs).await
-            {
-                let mut st = daemon_state.write().await;
-                st.secrets = secrets;
+            match auth::resolve_all_secrets(&client, addr, token, &secret_defs).await {
+                Ok(secrets) => {
+                    let mut st = daemon_state.write().await;
+                    st.secrets = secrets;
+                }
+                #[allow(clippy::print_stderr)]
+                Err(e) => {
+                    eprintln!("ERROR: initial Vault secret resolution failed: {e}");
+                    eprintln!("  Tools requiring Vault credentials will not function until secrets are resolved.");
+                }
             }
         }
     }
@@ -77,20 +83,21 @@ pub async fn spawn_daemon(
     });
 
     // Spawn auth refresh loop
-    if vault_addr.is_some() && vault_token.is_some() && !secret_defs.is_empty() {
-        let a_state = daemon_state.clone();
-        let a_cancel = cancel.clone();
-        let a_addr = vault_addr.unwrap_or_default();
-        let a_token = vault_token.unwrap_or_default();
-        tokio::spawn(async move {
-            run_auth_refresh_loop(a_state, a_cancel, &a_addr, &a_token).await;
-        });
+    if let (Some(a_addr), Some(a_token)) = (vault_addr, vault_token) {
+        if !secret_defs.is_empty() {
+            let a_state = daemon_state.clone();
+            let a_cancel = cancel.clone();
+            tokio::spawn(async move {
+                run_auth_refresh_loop(a_state, a_cancel, &a_addr, &a_token).await;
+            });
+        }
     }
 
     (cancel, daemon_state)
 }
 
 /// Auth refresh loop: sleeps until the soonest secret needs refresh.
+#[allow(clippy::print_stderr)]
 async fn run_auth_refresh_loop(
     daemon_state: Arc<RwLock<DaemonState>>,
     cancel: CancellationToken,
@@ -167,7 +174,11 @@ async fn run_auth_refresh_loop(
                     }
                 }
             }
-            let _ = last_err;
+            if let Some(err) = last_err {
+                eprintln!(
+                    "ERROR: failed to refresh secret '{env_var}' after {AUTH_RETRY_ATTEMPTS} attempts: {err}"
+                );
+            }
         }
     }
 }
