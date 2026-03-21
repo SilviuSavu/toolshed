@@ -2,3 +2,5 @@
 /logs
 .env
 **/.env
+sourcegraph/frontend-patched
+sourcegraph-dc/frontend-*
