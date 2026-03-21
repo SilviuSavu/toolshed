@@ -1,0 +1,33 @@
+FROM sourcegraph/frontend:7.0.2852
+
+# Replace the frontend binary with our patched version that removes
+# the "Limited Access Mode" restriction on Code Insights.
+#
+# Patches applied (binary-level, x86-64):
+# 1. createInsightLicenseCheck @ 0xcdc2cac: je→jmp to "return 0, nil"
+#    - Removes: "Cannot create more than 2 global insights in Limited Access Mode."
+#    - Removes: "Cannot create an insight on a non-global dashboard in Limited Access Mode."
+# 2. DeleteInsightsDashboard @ 0xcda8f8e: je→jmp skip license check
+#    - Removes: "Cannot delete this dashboard in Limited Access Mode"
+# 3. AddInsightViewToDashboard @ 0xcda94a3: je→jmp skip license check
+#    - Removes: "Cannot add insights to this dashboard while in Limited Access Mode"
+# 4. RemoveInsightViewFromDashboard @ 0xcdaa303: je→jmp skip license check
+#    - Removes: "Cannot remove insights from this dashboard while in Limited Access Mode"
+# 5. FreezeAllInsights @ 0xcd70646: no-op (xor eax,eax; xor ebx,ebx; ret)
+#    - Prevents the background job from freezing insights when no license is present
+#
+# Binary SHA256: 0959378faaa0a7a51c4ea79383bcb213dc8ddc9d082dea2191c492004af044af
+# Original SHA256: f7105e9d17593f3963b076010798d7880f1f414bf2cac466ac68ae9b4b1d5730
+#
+# VMA-to-file offset delta: 0x1001000
+#
+# Patch details (file offsets):
+#   0xbdc1cac: 0f 84 47 01 00 → e9 48 01 00 00 90  (createInsightLicenseCheck)
+#   0xbda7f8e: 74 2f          → eb 2f               (DeleteInsightsDashboard)
+#   0xbda84a3: 74 3a          → eb 3a               (AddInsightViewToDashboard)
+#   0xbda9303: 74 3a          → eb 3a               (RemoveInsightViewFromDashboard)
+#   0xbd6f646: 55 48 89 e5 48 83 ec 28 → 31 c0 31 db c3 90 90 90  (FreezeAllInsights)
+
+COPY frontend-patched /frontend
+RUN echo "Verify patched binary integrity" \
+ && sha256sum /frontend

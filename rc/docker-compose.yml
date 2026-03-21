@@ -1,0 +1,58 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  rc-server:
+    image: rc-server
+    ports:
+      - "7333:7333"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DEEPINFRA_API_KEY=${DEEPINFRA_API_KEY}
+      - RC_REPO_ROOT=/opt/rc/cache
+    volumes:
+      - rc-cache:/opt/rc/cache
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:7333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  default:
+    external: true
+    name: infra
+
+volumes:
+  qdrant-data:
+    external: true
+    name: rc_qdrant-data
+  rc-cache:
+    external: true
+    name: rc_rc-cache
